@@ -25,6 +25,7 @@ ALLOWED_SOURCE_HOSTS = {
     "img.heliar.top",
     "i.postimg.cc",
     "i.imgant.com",
+    "cqoevridrpdgqjyiksok.supabase.co",
 }
 WORKERS = 8
 
@@ -171,11 +172,26 @@ def build_row(
 ) -> dict:
     extension = extension_from_url(source_url)
     sticker_id = f"st_{slug}_{index:03d}"
-    filename = f"{sticker_id}{extension}"
-    storage_path = f"imports/{slug}/{filename}"
-    public_url = (
-        f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}"
+    existing_public_prefix = (
+        f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/"
     )
+    if source_url.startswith(existing_public_prefix):
+        storage_path = urllib.parse.unquote(
+            urllib.parse.urlparse(source_url).path.split(
+                f"/storage/v1/object/public/{BUCKET}/",
+                maxsplit=1,
+            )[1]
+        )
+        if not storage_path or ".." in Path(storage_path).parts:
+            raise ValueError(f"无效的现有 Storage 路径：{source_url}")
+        filename = Path(storage_path).name
+        public_url = source_url
+    else:
+        filename = f"{sticker_id}{extension}"
+        storage_path = f"imports/{slug}/{filename}"
+        public_url = (
+            f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}"
+        )
     tags = semantic_tags(label)
 
     return {
