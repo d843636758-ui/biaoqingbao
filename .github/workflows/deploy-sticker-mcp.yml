@@ -109,6 +109,79 @@ jobs:
           grep -q 'outputSchema' "$response_file"
           grep -q 'final_markdown' "$response_file"
           grep -q 'ui://sticker-mcp/sticker-v4.html' "$response_file"
+          grep -q 'inspect_pending_sticker' "$response_file"
+          grep -q 'save_sticker_metadata' "$response_file"
+
+      - name: Verify Storage auto-registration and metadata enrichment
+        if: steps.secrets.outputs.ready == 'true'
+        shell: bash
+        run: |
+          api_keys_json="$(supabase projects api-keys \
+            --project-ref "$PROJECT_ID" --reveal --output json)"
+          service_role_key="$(jq -er \
+            '.[] | select(.name == "service_role") | .api_key' \
+            <<<"$api_keys_json")"
+          echo "::add-mask::$service_role_key"
+
+          object_path='smoke/auto_sync_test.png'
+          object_url="https://${PROJECT_ID}.supabase.co/storage/v1/object/stickers/${object_path}"
+          public_url="https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/${object_path}"
+          sticker_id="st_auto_$(printf 'stickers:%s' "$object_path" | md5sum | cut -c1-20)"
+          auth_headers=(
+            --header "apikey: $service_role_key"
+            --header "Authorization: Bearer $service_role_key"
+          )
+
+          cleanup() {
+            curl --silent --show-error --request DELETE \
+              "${auth_headers[@]}" "$object_url" >/dev/null || true
+          }
+          trap cleanup EXIT
+          cleanup
+
+          image_file="$(mktemp)"
+          printf '%s' \
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL9WQAAAABJRU5ErkJggg==' \
+            | base64 --decode > "$image_file"
+          curl --fail --silent --show-error \
+            --request POST "${auth_headers[@]}" \
+            --header 'Content-Type: image/png' \
+            --header 'x-upsert: true' \
+            --data-binary "@$image_file" \
+            "$object_url" >/dev/null
+
+          catalog_file="$(mktemp)"
+          curl --fail --silent --show-error "${auth_headers[@]}" \
+            "https://${PROJECT_ID}.supabase.co/rest/v1/sticker_catalog?id=eq.${sticker_id}&select=id,public_url,metadata_status,assistant_enabled,auto_registered" \
+            --output "$catalog_file"
+          grep -q "$sticker_id" "$catalog_file"
+          grep -q "$public_url" "$catalog_file"
+          grep -q '"metadata_status":"pending"' "$catalog_file"
+          grep -q '"assistant_enabled":false' "$catalog_file"
+          grep -q '"auto_registered":true' "$catalog_file"
+
+          metadata_payload="$(jq -nc --arg id "$sticker_id" \
+            '{jsonrpc:"2.0",id:31,method:"tools/call",params:{name:"save_sticker_metadata",arguments:{sticker_id:$id,ocr_text:"",visual_description:"自动同步烟测用的一像素透明图片",semantic_intent:"验证新上传图片可以自动登记并完成元数据写回",tone_tags:["测试","中性"],use_intents:["部署烟测"],avoid_when:["正常聊天"],confidence:1,is_adult:false}}}')"
+          metadata_response="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --max-time 60 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json, text/event-stream" \
+            --data "$metadata_payload" \
+            "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
+            --output "$metadata_response"
+          grep -q '"saved":true' "$metadata_response"
+          grep -q '"metadata_status":"ready"' "$metadata_response"
+
+          cleanup
+          deleted_file="$(mktemp)"
+          curl --fail --silent --show-error "${auth_headers[@]}" \
+            "https://${PROJECT_ID}.supabase.co/rest/v1/sticker_catalog?id=eq.${sticker_id}&select=metadata_status,assistant_enabled" \
+            --output "$deleted_file"
+          grep -q '"metadata_status":"deleted"' "$deleted_file"
+          grep -q '"assistant_enabled":false' "$deleted_file"
+          trap - EXIT
 
       - name: Verify search_stickers tool call
         if: steps.secrets.outputs.ready == 'true'

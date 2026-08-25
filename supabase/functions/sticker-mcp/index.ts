@@ -35,7 +35,7 @@ const STICKER_ALT =
 // 一般不要动下面这些
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SERVER_VERSION = "1.8.0";
+const SERVER_VERSION = "1.9.0";
 // Keep every previously advertised UI URI readable. ChatGPT can retain a tool
 // descriptor for an existing conversation, so removing an older URI makes the
 // host fail before the iframe is even created ("Failed to fetch template").
@@ -67,6 +67,8 @@ type StickerRow = {
   confidence?: number | null;
   is_adult?: boolean | null;
   assistant_enabled?: boolean | null;
+  metadata_status?: string | null;
+  auto_registered?: boolean | null;
 };
 
 type StickerCandidate = {
@@ -115,6 +117,39 @@ function authHeaders(): HeadersInit {
   };
 }
 
+function serviceHeaders(extra?: Record<string, string>): HeadersInit {
+  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!key) {
+    throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY for catalog enrichment.");
+  }
+
+  return {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    ...(extra ?? {}),
+  };
+}
+
+const CATALOG_COLUMNS = [
+  "id",
+  "public_url",
+  "filename",
+  "storage_path",
+  "mime_type",
+  "animated",
+  "ocr_text",
+  "visual_description",
+  "semantic_intent",
+  "tone_tags",
+  "use_intents",
+  "avoid_when",
+  "confidence",
+  "is_adult",
+  "assistant_enabled",
+  "metadata_status",
+  "auto_registered",
+].join(",");
+
 function safeArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.map((x) => String(x ?? "").trim()).filter(Boolean)
@@ -137,31 +172,13 @@ function clean(row: StickerRow): StickerCandidate {
 }
 
 async function fetchEnabledStickers(): Promise<StickerRow[]> {
-  const columns = [
-    "id",
-    "public_url",
-    "filename",
-    "storage_path",
-    "mime_type",
-    "animated",
-    "ocr_text",
-    "visual_description",
-    "semantic_intent",
-    "tone_tags",
-    "use_intents",
-    "avoid_when",
-    "confidence",
-    "is_adult",
-    "assistant_enabled",
-  ].join(",");
-
   const pageSize = 1000;
   const rows: StickerRow[] = [];
 
   for (let offset = 0; offset < 10_000; offset += pageSize) {
     const url =
       `${normalizedOrigin()}/rest/v1/sticker_catalog` +
-      `?assistant_enabled=eq.true&select=${encodeURIComponent(columns)}` +
+      `?assistant_enabled=eq.true&metadata_status=eq.ready&select=${encodeURIComponent(CATALOG_COLUMNS)}` +
       `&order=id.asc&limit=${pageSize}&offset=${offset}`;
 
     const response = await fetch(url, {
@@ -183,29 +200,12 @@ async function fetchEnabledStickers(): Promise<StickerRow[]> {
 }
 
 async function fetchStickerById(id: string): Promise<StickerRow | null> {
-  const columns = [
-    "id",
-    "public_url",
-    "filename",
-    "storage_path",
-    "mime_type",
-    "animated",
-    "ocr_text",
-    "visual_description",
-    "semantic_intent",
-    "tone_tags",
-    "use_intents",
-    "avoid_when",
-    "confidence",
-    "is_adult",
-    "assistant_enabled",
-  ].join(",");
-
   const url =
     `${normalizedOrigin()}/rest/v1/sticker_catalog` +
     `?id=eq.${encodeURIComponent(id)}` +
     `&assistant_enabled=eq.true` +
-    `&select=${encodeURIComponent(columns)}` +
+    `&metadata_status=eq.ready` +
+    `&select=${encodeURIComponent(CATALOG_COLUMNS)}` +
     `&limit=1`;
 
   const response = await fetch(url, {
@@ -220,6 +220,133 @@ async function fetchStickerById(id: string): Promise<StickerRow | null> {
 
   const rows: StickerRow[] = await response.json();
   return rows[0] ?? null;
+}
+
+async function fetchNextPendingSticker(): Promise<StickerRow | null> {
+  const url =
+    `${normalizedOrigin()}/rest/v1/sticker_catalog` +
+    `?metadata_status=eq.pending&auto_registered=eq.true` +
+    `&select=${encodeURIComponent(CATALOG_COLUMNS)}` +
+    `&order=created_at.asc&limit=1`;
+  const response = await fetch(url, { headers: serviceHeaders() });
+
+  if (!response.ok) {
+    throw new Error(
+      `Pending sticker query failed: ${response.status} ${await response.text()}`,
+    );
+  }
+
+  const rows: StickerRow[] = await response.json();
+  return rows[0] ?? null;
+}
+
+async function pendingStickerContent(row: StickerRow): Promise<Array<
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+>> {
+  const result: Array<
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string }
+  > = [
+    {
+      type: "text",
+      text: JSON.stringify(
+        {
+          pending: true,
+          sticker_id: row.id,
+          filename: row.filename ?? "",
+          storage_path: row.storage_path ?? "",
+          instruction:
+            "请查看随附图片，准确读取可见文字并概括画面、语义、语气、适用语境和避用语境；随后调用 save_sticker_metadata 写回。不要仅根据文件名猜测。",
+        },
+        null,
+        2,
+      ),
+    },
+  ];
+
+  const response = await fetch(row.public_url);
+  if (!response.ok) {
+    throw new Error(`Pending image fetch failed: ${response.status}`);
+  }
+
+  const length = Number(response.headers.get("content-length") ?? "0");
+  if (length > 12 * 1024 * 1024) {
+    throw new Error("Pending image is larger than 12 MB");
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > 12 * 1024 * 1024) {
+    throw new Error("Pending image is larger than 12 MB");
+  }
+
+  result.push({
+    type: "image",
+    data: bytesToBase64(bytes),
+    mimeType:
+      response.headers.get("content-type")?.split(";")[0]?.trim() ||
+      row.mime_type ||
+      "image/jpeg",
+  });
+  return result;
+}
+
+type StickerMetadataInput = {
+  sticker_id: string;
+  ocr_text: string;
+  visual_description: string;
+  semantic_intent: string;
+  tone_tags: string[];
+  use_intents: string[];
+  avoid_when: string[];
+  confidence: number;
+  is_adult: boolean;
+};
+
+async function savePendingStickerMetadata(
+  metadata: StickerMetadataInput,
+): Promise<StickerRow> {
+  const enabled = !metadata.is_adult;
+  const url =
+    `${normalizedOrigin()}/rest/v1/sticker_catalog` +
+    `?id=eq.${encodeURIComponent(metadata.sticker_id)}` +
+    `&metadata_status=eq.pending&auto_registered=eq.true` +
+    `&select=${encodeURIComponent(CATALOG_COLUMNS)}`;
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: serviceHeaders({
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    }),
+    body: JSON.stringify({
+      ocr_text: metadata.ocr_text,
+      visual_description: metadata.visual_description,
+      semantic_intent: metadata.semantic_intent,
+      tone_tags: metadata.tone_tags,
+      use_intents: metadata.use_intents,
+      avoid_when: metadata.avoid_when,
+      confidence: metadata.confidence,
+      is_adult: metadata.is_adult,
+      assistant_enabled: enabled,
+      metadata_status: enabled ? "ready" : "blocked",
+      metadata_updated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Sticker metadata update failed: ${response.status} ${await response.text()}`,
+    );
+  }
+
+  const rows: StickerRow[] = await response.json();
+  if (!rows[0]) {
+    throw new Error(
+      "Sticker metadata was not updated; it may already have been reviewed.",
+    );
+  }
+  return rows[0];
 }
 
 function normalizeText(text: string): string {
@@ -790,9 +917,88 @@ function createServer(): McpServer {
     },
     {
       instructions:
-        "表情包工作流：先用 search_stickers 选真实 ID，再调用 send_sticker。" +
+        "Storage 自动入库：search_stickers 或 inspect_pending_sticker 若附带待识别图片，必须先看图，调用 save_sticker_metadata 写回真实中文 OCR、画面描述、语义、语气、用途与避用语境；不要根据文件名猜。每轮最多处理 3 张。" +
+        "表情包发送：用 search_stickers 选真实 ID，再调用 send_sticker。" +
         "调用 send_sticker 后，最终用户可见回复必须逐字包含 structuredContent.final_markdown，" +
         "只输出一次且不得放进代码块；这是 iOS 在回答结束后收起内联工具卡时的持久图片后备，不得省略。",
+    },
+  );
+
+  server.registerTool(
+    "inspect_pending_sticker",
+    {
+      title: "识别新上传表情包",
+      description:
+        "读取一张由 Supabase Storage 自动登记、但尚未生成检索语义的新图片。若返回 pending=true，必须查看随附图片并调用 save_sticker_metadata；不得仅按小写文件名猜内容。每轮最多处理 3 张。",
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      const pending = await fetchNextPendingSticker();
+      if (!pending) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ pending: false, message: "没有待识别图片" }),
+            },
+          ],
+        };
+      }
+      return { content: await pendingStickerContent(pending) };
+    },
+  );
+
+  server.registerTool(
+    "save_sticker_metadata",
+    {
+      title: "保存表情包中文语义",
+      description:
+        "只用于 inspect_pending_sticker 或 search_stickers 返回的 st_auto_ 待识别图片。根据实际画面写入中文 OCR、描述、聊天语义、语气标签、适用和避用语境；成功后图片会自动进入可检索目录。",
+      inputSchema: {
+        sticker_id: z.string().regex(/^st_auto_[a-f0-9]{20}$/),
+        ocr_text: z.string().max(500).describe("图片中实际可见文字；没有文字传空字符串"),
+        visual_description: z.string().min(4).max(1000),
+        semantic_intent: z.string().min(2).max(600),
+        tone_tags: z.array(z.string().min(1).max(50)).min(1).max(16),
+        use_intents: z.array(z.string().min(2).max(160)).min(1).max(10),
+        avoid_when: z.array(z.string().min(2).max(160)).max(10).default([]),
+        confidence: z.number().min(0).max(1).default(0.9),
+        is_adult: z.boolean().default(false),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (metadata) => {
+      const saved = await savePendingStickerMetadata(metadata);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                saved: true,
+                sticker_id: saved.id,
+                metadata_status: saved.metadata_status,
+                assistant_enabled: saved.assistant_enabled,
+                message: saved.assistant_enabled
+                  ? "中文语义已写回，图片现在可检索"
+                  : "图片已识别，但因内容分级未启用",
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
     },
   );
 
@@ -803,7 +1009,7 @@ function createServer(): McpServer {
     {
       title: "搜索表情包",
       description:
-        "根据当前完整聊天语境搜索表情包候选。只负责返回候选文本，不会发送图片。选中真实候选 id 后，再调用 send_sticker。",
+        "根据当前完整聊天语境搜索表情包候选。若结果末尾附带 pending=true 的新上传图片，先看图并调用 save_sticker_metadata；同时仍可从 candidates 选真实 ID，再调用 send_sticker。",
       inputSchema: {
         query: z.string().min(2).describe("概括当前完整语境，而不是只写一个词"),
         emotion: z.string().optional().describe("可选：情绪，例如开心、委屈、生气"),
@@ -842,14 +1048,27 @@ function createServer(): McpServer {
         candidates: candidates.map(candidateSummary),
       };
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(payload, null, 2),
-          },
-        ],
-      };
+      const content: Array<
+        | { type: "text"; text: string }
+        | { type: "image"; data: string; mimeType: string }
+      > = [
+        {
+          type: "text",
+          text: JSON.stringify(payload, null, 2),
+        },
+      ];
+
+      try {
+        const pending = await fetchNextPendingSticker();
+        if (pending) content.push(...await pendingStickerContent(pending));
+      } catch (error) {
+        content.push({
+          type: "text",
+          text: `待识别图片读取暂时失败，不影响现有目录检索：${String(error)}`,
+        });
+      }
+
+      return { content };
     },
   );
 
