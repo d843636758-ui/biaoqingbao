@@ -87,3 +87,32 @@ jobs:
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
             --output "$response_file"
           grep -Eq '"protocolVersion"|"serverInfo"' "$response_file"
+
+      - name: Verify search_stickers tool call
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          response_file="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --max-time 45 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json, text/event-stream" \
+            --data '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_stickers","arguments":{"query":"部署成功后开心庆祝","emotion":"开心","tone":"庆祝","limit":3}}}' \
+            "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
+            --output "$response_file"
+          grep -q 'st_control_001' "$response_file"
+
+      - name: Verify send_sticker tool call
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          response_file="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --max-time 60 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json, text/event-stream" \
+            --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_sticker","arguments":{"sticker_id":"st_control_001"}}}' \
+            "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
+            --output "$response_file"
+          grep -q 'st_control_001' "$response_file"
+          grep -q 'structuredContent' "$response_file"
