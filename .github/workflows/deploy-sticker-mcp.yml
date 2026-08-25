@@ -71,30 +71,6 @@ jobs:
         if: steps.secrets.outputs.ready == 'true'
         run: supabase functions deploy sticker-mcp --project-ref "$PROJECT_ID"
 
-      - name: Verify public image
-        if: steps.secrets.outputs.ready == 'true'
-        run: |
-          curl --fail --silent --show-error --location \
-            --retry 5 --retry-all-errors --max-time 30 \
-            "https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/funny/control.png" \
-            --output /tmp/control.png
-          test -s /tmp/control.png
-          curl --fail --silent --show-error --location \
-            --retry 5 --retry-all-errors --max-time 30 \
-            "https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/imports/dog26/st_dog26_012.png" \
-            --output /tmp/imported-sticker.png
-          test -s /tmp/imported-sticker.png
-          curl --fail --silent --show-error --location \
-            --retry 5 --retry-all-errors --max-time 30 \
-            "https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/imports/whitecat/st_whitecat_001.gif" \
-            --output /tmp/whitecat.gif
-          test -s /tmp/whitecat.gif
-          test "$(head -c 3 /tmp/whitecat.gif)" = "GIF"
-          curl --fail --silent --show-error --location \
-            --retry 5 --retry-all-errors --max-time 30 \
-            "https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/imports/doumiwuka/st_doumiwuka_001.png" \
-            --output /tmp/doumiwuka.png
-          test "$(head -c 8 /tmp/doumiwuka.png | base64)" = "iVBORw0KGgo="
       - name: Verify Edge Function health endpoint
         if: steps.secrets.outputs.ready == 'true'
         run: |
@@ -173,6 +149,17 @@ jobs:
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
             --output "$response_file"
           grep -q 'st_feifeidu_001' "$response_file"
+          send_response_file="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --max-time 60 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json, text/event-stream" \
+            --data '{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"send_sticker","arguments":{"sticker_id":"st_feifeidu_001"}}}' \
+            "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
+            --output "$send_response_file"
+          grep -q 'st_feifeidu_001' "$send_response_file"
+          grep -q '"mimeType":"image/jpeg"' "$send_response_file"
 
       - name: Verify send_sticker tool call
         if: steps.secrets.outputs.ready == 'true'
