@@ -1,0 +1,27 @@
+[
+  {
+    "id": "st_control_001",
+    "filename": "control.png",
+    "storage_path": "funny/control.png",
+    "public_url": "https://cqoevridrpdgqjyiksok.supabase.co/storage/v1/object/public/stickers/funny/control.png",
+    "upload": false,
+    "mime_type": "image/png",
+    "animated": false,
+    "ocr_text": "",
+    "visual_description": "控制组测试图片 control.png，用于验证 Storage 公网访问与 MCP 图片渲染链路",
+    "semantic_intent": "链路测试与占位控制组，不代表特定聊天情绪",
+    "tone_tags": [
+      "测试",
+      "中性"
+    ],
+    "use_intents": [
+      "验证 search_stickers 与 send_sticker 是否能正常返回并显示图片"
+    ],
+    "avoid_when": [
+      "正式投入聊天前，请先补全这张图的真实语义与使用边界"
+    ],
+    "confidence": 1.0,
+    "is_adult": false,
+    "assistant_enabled": true
+  }
+]
