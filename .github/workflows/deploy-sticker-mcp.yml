@@ -111,6 +111,9 @@ jobs:
           grep -q 'ui://sticker-mcp/sticker-v4.html' "$response_file"
           grep -q 'inspect_pending_sticker' "$response_file"
           grep -q 'save_sticker_metadata' "$response_file"
+          grep -q 'add_sticker_from_chat' "$response_file"
+          grep -q 'openai/fileParams' "$response_file"
+          grep -q 'download_url' "$response_file"
 
       - name: Verify Storage auto-registration and metadata enrichment
         if: steps.secrets.outputs.ready == 'true'
@@ -173,6 +176,36 @@ jobs:
             --output "$metadata_response"
           grep -q '"saved":true' "$metadata_response"
           grep -q '"metadata_status":"ready"' "$metadata_response"
+
+          chat_digest="$(sha256sum "$image_file" | cut -c1-32)"
+          chat_path="chat/${chat_digest}.png"
+          chat_object_url="https://${PROJECT_ID}.supabase.co/storage/v1/object/stickers/${chat_path}"
+          chat_sticker_id="st_auto_$(printf 'stickers:%s' "$chat_path" | md5sum | cut -c1-20)"
+          chat_payload="$(jq -nc \
+            --arg source_url "$public_url" \
+            '{jsonrpc:"2.0",id:32,method:"tools/call",params:{name:"add_sticker_from_chat",arguments:{file:{download_url:$source_url,file_id:"file_smoke_test",mime_type:"image/png",file_name:"smoke.png"},ocr_text:"",visual_description:"聊天附件写入烟测用的一像素透明图片",semantic_intent:"验证普通 ChatGPT 文件参数可以直接写入表情包库",tone_tags:["测试","中性"],use_intents:["聊天附件写入烟测"],avoid_when:["正常聊天"],confidence:1,is_adult:false}}}')"
+          chat_response="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --max-time 60 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json, text/event-stream" \
+            --data "$chat_payload" \
+            "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
+            --output "$chat_response"
+          grep -q '"saved":true' "$chat_response"
+          grep -q "$chat_sticker_id" "$chat_response"
+          grep -q "$chat_path" "$chat_response"
+
+          chat_catalog_file="$(mktemp)"
+          curl --fail --silent --show-error "${auth_headers[@]}" \
+            "https://${PROJECT_ID}.supabase.co/rest/v1/sticker_catalog?id=eq.${chat_sticker_id}&select=metadata_status,assistant_enabled,auto_registered" \
+            --output "$chat_catalog_file"
+          grep -q '"metadata_status":"ready"' "$chat_catalog_file"
+          grep -q '"assistant_enabled":true' "$chat_catalog_file"
+          grep -q '"auto_registered":true' "$chat_catalog_file"
+          curl --fail --silent --show-error --request DELETE \
+            "${auth_headers[@]}" "$chat_object_url" >/dev/null
 
           cleanup
           deleted_file="$(mktemp)"

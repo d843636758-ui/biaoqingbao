@@ -35,7 +35,7 @@ const STICKER_ALT =
 // 一般不要动下面这些
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SERVER_VERSION = "1.9.0";
+const SERVER_VERSION = "2.0.0";
 // Keep every previously advertised UI URI readable. ChatGPT can retain a tool
 // descriptor for an existing conversation, so removing an older URI makes the
 // host fail before the iframe is even created ("Failed to fetch template").
@@ -83,6 +83,15 @@ type StickerCandidate = {
   confidence: number;
   score: number;
 };
+
+const OpenAIFileInput = z.object({
+  download_url: z.string().url(),
+  file_id: z.string().min(1),
+  mime_type: z.string().optional(),
+  file_name: z.string().optional(),
+}).strict();
+
+type OpenAIFile = z.infer<typeof OpenAIFileInput>;
 
 function readPublicKey(): string {
   // Supabase 项目通常会自动注入 SUPABASE_ANON_KEY。
@@ -346,6 +355,170 @@ async function savePendingStickerMetadata(
       "Sticker metadata was not updated; it may already have been reviewed.",
     );
   }
+  return rows[0];
+}
+
+function trustedChatFileUrl(rawUrl: string): URL {
+  const url = new URL(rawUrl);
+  if (url.protocol !== "https:") {
+    throw new Error("Chat file download URL must use HTTPS");
+  }
+
+  const host = url.hostname.toLowerCase();
+  const trusted =
+    url.origin === normalizedOrigin() ||
+    host === "chatgpt.com" ||
+    host.endsWith(".chatgpt.com") ||
+    host === "oaiusercontent.com" ||
+    host.endsWith(".oaiusercontent.com") ||
+    host === "openai.com" ||
+    host.endsWith(".openai.com") ||
+    (/^oai[a-z0-9-]*\.blob\.core\.windows\.net$/.test(host)) ||
+    (host.startsWith("oai") && host.endsWith(".amazonaws.com"));
+
+  if (!trusted) {
+    throw new Error(`Untrusted ChatGPT file host: ${host}`);
+  }
+  return url;
+}
+
+function detectImage(bytes: Uint8Array): {
+  extension: "jpg" | "png" | "gif" | "webp";
+  mimeType: string;
+  animated: boolean;
+} {
+  const starts = (...values: number[]) =>
+    values.every((value, index) => bytes[index] === value);
+
+  if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) {
+    return { extension: "png", mimeType: "image/png", animated: false };
+  }
+  if (starts(0xff, 0xd8, 0xff)) {
+    return { extension: "jpg", mimeType: "image/jpeg", animated: false };
+  }
+  const ascii = new TextDecoder().decode(bytes.subarray(0, 12));
+  if (ascii.startsWith("GIF87a") || ascii.startsWith("GIF89a")) {
+    return { extension: "gif", mimeType: "image/gif", animated: true };
+  }
+  if (ascii.startsWith("RIFF") && ascii.slice(8, 12) === "WEBP") {
+    return { extension: "webp", mimeType: "image/webp", animated: false };
+  }
+  throw new Error("Attached file is not a supported JPG, PNG, GIF, or WebP image");
+}
+
+async function downloadChatImage(file: OpenAIFile): Promise<{
+  bytes: Uint8Array;
+  extension: "jpg" | "png" | "gif" | "webp";
+  mimeType: string;
+  animated: boolean;
+}> {
+  const sourceUrl = trustedChatFileUrl(file.download_url);
+  const response = await fetch(sourceUrl, { redirect: "follow" });
+  if (!response.ok) {
+    throw new Error(`Chat file download failed: ${response.status}`);
+  }
+  trustedChatFileUrl(response.url || sourceUrl.toString());
+
+  const declaredLength = Number(response.headers.get("content-length") ?? "0");
+  if (declaredLength > 12 * 1024 * 1024) {
+    throw new Error("Attached image is larger than 12 MB");
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (!bytes.byteLength || bytes.byteLength > 12 * 1024 * 1024) {
+    throw new Error("Attached image is empty or larger than 12 MB");
+  }
+  return { bytes, ...detectImage(bytes) };
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return [...digest].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function uploadChatSticker(
+  storagePath: string,
+  bytes: Uint8Array,
+  mimeType: string,
+): Promise<void> {
+  const escapedPath = storagePath
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  const response = await fetch(
+    `${normalizedOrigin()}/storage/v1/object/stickers/${escapedPath}`,
+    {
+      method: "POST",
+      headers: serviceHeaders({
+        "Content-Type": mimeType,
+        "x-upsert": "true",
+      }),
+      body: bytes,
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Chat sticker upload failed: ${response.status} ${await response.text()}`,
+    );
+  }
+}
+
+async function fetchStickerByStoragePath(
+  storagePath: string,
+): Promise<StickerRow | null> {
+  const url =
+    `${normalizedOrigin()}/rest/v1/sticker_catalog` +
+    `?storage_path=eq.${encodeURIComponent(storagePath)}` +
+    `&auto_registered=eq.true` +
+    `&select=${encodeURIComponent(CATALOG_COLUMNS)}&limit=1`;
+  const response = await fetch(url, { headers: serviceHeaders() });
+  if (!response.ok) {
+    throw new Error(
+      `Uploaded sticker lookup failed: ${response.status} ${await response.text()}`,
+    );
+  }
+  const rows: StickerRow[] = await response.json();
+  return rows[0] ?? null;
+}
+
+async function upsertAutoStickerMetadata(
+  stickerId: string,
+  metadata: StickerMetadataInput,
+): Promise<StickerRow> {
+  const enabled = !metadata.is_adult;
+  const url =
+    `${normalizedOrigin()}/rest/v1/sticker_catalog` +
+    `?id=eq.${encodeURIComponent(stickerId)}&auto_registered=eq.true` +
+    `&select=${encodeURIComponent(CATALOG_COLUMNS)}`;
+  const now = new Date().toISOString();
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: serviceHeaders({
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    }),
+    body: JSON.stringify({
+      ocr_text: metadata.ocr_text,
+      visual_description: metadata.visual_description,
+      semantic_intent: metadata.semantic_intent,
+      tone_tags: metadata.tone_tags,
+      use_intents: metadata.use_intents,
+      avoid_when: metadata.avoid_when,
+      confidence: metadata.confidence,
+      is_adult: metadata.is_adult,
+      assistant_enabled: enabled,
+      metadata_status: enabled ? "ready" : "blocked",
+      metadata_updated_at: now,
+      updated_at: now,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Uploaded sticker metadata failed: ${response.status} ${await response.text()}`,
+    );
+  }
+  const rows: StickerRow[] = await response.json();
+  if (!rows[0]) throw new Error("Uploaded sticker catalog row was not found");
   return rows[0];
 }
 
@@ -917,10 +1090,103 @@ function createServer(): McpServer {
     },
     {
       instructions:
+        "用户在聊天中上传图片并要求加入表情包库时：先直接查看附件画面，再调用 add_sticker_from_chat；把附件传入 file，并根据真实画面填写中文 OCR、描述、语义、语气、用途与避用语境，不要要求用户先传 Supabase 或提供 URL。" +
         "Storage 自动入库：search_stickers 或 inspect_pending_sticker 若附带待识别图片，必须先看图，调用 save_sticker_metadata 写回真实中文 OCR、画面描述、语义、语气、用途与避用语境；不要根据文件名猜。每轮最多处理 3 张。" +
         "表情包发送：用 search_stickers 选真实 ID，再调用 send_sticker。" +
         "调用 send_sticker 后，最终用户可见回复必须逐字包含 structuredContent.final_markdown，" +
         "只输出一次且不得放进代码块；这是 iOS 在回答结束后收起内联工具卡时的持久图片后备，不得省略。",
+    },
+  );
+
+  server.registerTool(
+    "add_sticker_from_chat",
+    {
+      title: "把聊天图片加入表情包库",
+      description:
+        "把用户在当前 ChatGPT 对话中上传的单张图片永久保存到 Supabase 表情包库。调用前必须先看图，再按真实画面填写中文 OCR、描述、语义、语气、适用及避用语境；服务器会自动使用小写哈希文件名、上传 Storage 并立即加入检索。不要要求用户先提供公网 URL。",
+      inputSchema: {
+        file: OpenAIFileInput,
+        ocr_text: z.string().max(500).describe("图片中实际可见文字；没有文字传空字符串"),
+        visual_description: z.string().min(4).max(1000),
+        semantic_intent: z.string().min(2).max(600),
+        tone_tags: z.array(z.string().min(1).max(50)).min(1).max(16),
+        use_intents: z.array(z.string().min(2).max(160)).min(1).max(10),
+        avoid_when: z.array(z.string().min(2).max(160)).max(10).default([]),
+        confidence: z.number().min(0).max(1).default(0.9),
+        is_adult: z.boolean().default(false),
+      },
+      outputSchema: {
+        saved: z.boolean(),
+        sticker_id: z.string(),
+        storage_path: z.string(),
+        url: z.string().url(),
+        metadata_status: z.string(),
+        assistant_enabled: z.boolean(),
+        duplicate_safe: z.boolean(),
+        final_markdown: z.string(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      _meta: {
+        "openai/fileParams": ["file"],
+        ui: { visibility: ["model"] },
+        "openai/toolInvocation/invoking": "正在识图并加入表情包库…",
+        "openai/toolInvocation/invoked": "表情包已加入库",
+      },
+    },
+    async ({ file, ...metadata }) => {
+      const image = await downloadChatImage(file);
+      const digest = await sha256Hex(image.bytes);
+      const storagePath = `chat/${digest.slice(0, 32)}.${image.extension}`;
+      await uploadChatSticker(
+        storagePath,
+        image.bytes,
+        image.mimeType,
+      );
+
+      let row: StickerRow | null = null;
+      for (let attempt = 0; attempt < 5 && !row; attempt++) {
+        row = await fetchStickerByStoragePath(storagePath);
+        if (!row) await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      if (!row) throw new Error("Storage upload succeeded but catalog sync is missing");
+
+      const saved = await upsertAutoStickerMetadata(row.id, {
+        sticker_id: row.id,
+        ...metadata,
+      });
+      const finalMarkdown = `![表情包](${saved.public_url})`;
+      const payload = {
+        saved: true,
+        sticker_id: saved.id,
+        storage_path: String(saved.storage_path ?? storagePath),
+        url: saved.public_url,
+        metadata_status: String(saved.metadata_status ?? ""),
+        assistant_enabled: Boolean(saved.assistant_enabled),
+        duplicate_safe: true,
+        final_markdown: finalMarkdown,
+      };
+
+      return {
+        structuredContent: payload,
+        content: [
+          {
+            type: "text",
+            text:
+              `表情包 ${saved.id} 已写入。相同图片再次添加会复用同一小写哈希路径，不会重复占用空间。` +
+              `\n\n最终回复请原样保留：\n\n${finalMarkdown}`,
+          },
+          {
+            type: "image",
+            data: bytesToBase64(image.bytes),
+            mimeType: image.mimeType,
+          },
+        ],
+      };
     },
   );
 

@@ -42,3 +42,16 @@
 5. 覆盖同一路径会保留已整理的语义，删除 Storage 图片会自动停用目录记录。
 
 文件名只需使用 Supabase 接受的小写英文、数字和路径字符；检索依赖目录表中的中文语义，不依赖文件名。单张图片上限为 12 MB。
+
+## 从普通 ChatGPT 对话直接写入
+
+`add_sticker_from_chat` 使用 ChatGPT 官方文件参数 `_meta["openai/fileParams"]`。
+用户可以在普通网页端或移动端聊天中直接上传一张图片并要求加入表情包库：
+
+1. ChatGPT 先查看附件并生成中文 OCR、描述、语义和标签；
+2. 工具通过临时 `download_url` 下载原图并校验真实文件签名；
+3. 图片以内容 SHA-256 生成 `chat/<lowercase-hash>.<ext>` 路径并上传；
+4. Storage trigger 自动登记，工具随后写回语义并立即设为 `ready`；
+5. 相同图片重复添加会复用同一路径，不重复占用空间。
+
+该入口支持 JPG、PNG、GIF、WebP，单张上限同样为 12 MB。服务器只接受 Supabase 项目自身及 OpenAI/ChatGPT 文件服务的 HTTPS 下载地址，避免把公开写工具变成任意 URL 下载器。
