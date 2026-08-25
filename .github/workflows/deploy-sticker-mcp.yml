@@ -116,3 +116,18 @@ jobs:
             --output "$response_file"
           grep -q 'st_control_001' "$response_file"
           grep -q 'structuredContent' "$response_file"
+
+      - name: Verify widget resource metadata
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          response_file="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --max-time 45 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json, text/event-stream" \
+            --data '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"ui://sticker-mcp/sticker.html"}}' \
+            "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
+            --output "$response_file"
+          grep -q '"domain"' "$response_file"
+          grep -q "https://${PROJECT_ID}.supabase.co" "$response_file"

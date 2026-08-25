@@ -613,10 +613,19 @@ function createServer(): McpServer {
           _meta: {
             ui: {
               prefersBorder: false,
+              domain: normalizedOrigin(),
               csp: {
                 resourceDomains: [normalizedOrigin()],
                 connectDomains: [],
               },
+            },
+            // Keep the legacy aliases for ChatGPT clients that have not yet
+            // migrated to the standard `_meta.ui` fields.
+            "openai/widgetPrefersBorder": false,
+            "openai/widgetDomain": normalizedOrigin(),
+            "openai/widgetCSP": {
+              resource_domains: [normalizedOrigin()],
+              connect_domains: [],
             },
           },
         },
