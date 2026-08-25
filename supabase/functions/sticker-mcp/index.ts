@@ -35,7 +35,7 @@ const STICKER_ALT =
 // 一般不要动下面这些
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SERVER_VERSION = "1.7.0";
+const SERVER_VERSION = "1.8.0";
 // Keep every previously advertised UI URI readable. ChatGPT can retain a tool
 // descriptor for an existing conversation, so removing an older URI makes the
 // host fail before the iframe is even created ("Failed to fetch template").
@@ -319,6 +319,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 async function createStickerContent(
   url: string,
   alt: string,
+  finalMarkdown: string,
 ): Promise<Array<
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string }
@@ -329,7 +330,11 @@ async function createStickerContent(
   > = [
     {
       type: "text",
-      text: alt,
+      text:
+        `${alt}\n\n` +
+        "iOS may collapse the inline tool card after the answer completes. " +
+        "In the final user-visible reply, copy the following Markdown image " +
+        `exactly once, outside a code block:\n\n${finalMarkdown}`,
     },
   ];
 
@@ -390,6 +395,7 @@ function buildStickerPayload(stickerId: string, row: StickerRow | null) {
     alt,
     caption,
     sticker_id: stickerId,
+    final_markdown: `![表情包](${url})`,
   };
 }
 
@@ -777,10 +783,18 @@ const WIDGET_HTML = String.raw`<!doctype html>
 </html>`;
 
 function createServer(): McpServer {
-  const server = new McpServer({
-    name: "智能表情包 MCP",
-    version: SERVER_VERSION,
-  });
+  const server = new McpServer(
+    {
+      name: "智能表情包 MCP",
+      version: SERVER_VERSION,
+    },
+    {
+      instructions:
+        "表情包工作流：先用 search_stickers 选真实 ID，再调用 send_sticker。" +
+        "调用 send_sticker 后，最终用户可见回复必须逐字包含 structuredContent.final_markdown，" +
+        "只输出一次且不得放进代码块；这是 iOS 在回答结束后收起内联工具卡时的持久图片后备，不得省略。",
+    },
+  );
 
   // 重要：search_stickers 只是普通 MCP Tool。
   // 不绑定 UI，不返回 structuredContent。
@@ -847,7 +861,7 @@ function createServer(): McpServer {
     {
       title: "发送表情包",
       description:
-        "把 search_stickers 返回的真实 sticker_id 原样传入；按 ID 查询 sticker_catalog 并显示对应图片。不要编造 ID。",
+        "把 search_stickers 返回的真实 sticker_id 原样传入；按 ID 查询 sticker_catalog 并显示对应图片。不要编造 ID。调用后，最终回复必须原样包含 structuredContent.final_markdown（不要放代码块），确保 iOS 收起中间工具卡后图片仍留在消息正文。",
       inputSchema: {
         sticker_id: z
           .string()
@@ -859,6 +873,7 @@ function createServer(): McpServer {
         alt: z.string(),
         caption: z.string(),
         sticker_id: z.string(),
+        final_markdown: z.string(),
       },
       annotations: {
         readOnlyHint: true,
@@ -881,7 +896,11 @@ function createServer(): McpServer {
 
       return {
         structuredContent: payload,
-        content: await createStickerContent(payload.url, payload.alt),
+        content: await createStickerContent(
+          payload.url,
+          payload.alt,
+          payload.final_markdown,
+        ),
       };
     },
   );
