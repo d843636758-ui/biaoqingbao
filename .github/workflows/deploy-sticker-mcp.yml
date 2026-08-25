@@ -54,6 +54,19 @@ jobs:
         if: steps.secrets.outputs.ready == 'true'
         run: supabase db push
 
+      - name: Import sticker URL batches
+        if: steps.secrets.outputs.ready == 'true'
+        shell: bash
+        run: |
+          api_keys_json="$(supabase projects api-keys \
+            --project-ref "$PROJECT_ID" --reveal --output json)"
+          service_role_key="$(jq -er \
+            '.[] | select(.name == "service_role") | .api_key' \
+            <<<"$api_keys_json")"
+          echo "::add-mask::$service_role_key"
+          SUPABASE_SERVICE_ROLE_KEY="$service_role_key" \
+            python3 tools/import_url_batch.py
+
       - name: Deploy Edge Function
         if: steps.secrets.outputs.ready == 'true'
         run: supabase functions deploy sticker-mcp --project-ref "$PROJECT_ID"
@@ -66,6 +79,11 @@ jobs:
             "https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/funny/control.png" \
             --output /tmp/control.png
           test -s /tmp/control.png
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --max-time 30 \
+            "https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/imports/dog26/st_dog26_012.png" \
+            --output /tmp/imported-sticker.png
+          test -s /tmp/imported-sticker.png
 
       - name: Verify Edge Function health endpoint
         if: steps.secrets.outputs.ready == 'true'
@@ -97,10 +115,10 @@ jobs:
             --request POST \
             --header "Content-Type: application/json" \
             --header "Accept: application/json, text/event-stream" \
-            --data '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_stickers","arguments":{"query":"部署成功后开心庆祝","emotion":"开心","tone":"庆祝","limit":3}}}' \
+            --data '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_stickers","arguments":{"query":"气呼呼，真的生气了","emotion":"生气","tone":"气呼呼","limit":5}}}' \
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
             --output "$response_file"
-          grep -q 'st_control_001' "$response_file"
+          grep -q 'st_dog28_006' "$response_file"
 
       - name: Verify send_sticker tool call
         if: steps.secrets.outputs.ready == 'true'
@@ -111,10 +129,10 @@ jobs:
             --request POST \
             --header "Content-Type: application/json" \
             --header "Accept: application/json, text/event-stream" \
-            --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_sticker","arguments":{"sticker_id":"st_control_001"}}}' \
+            --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_sticker","arguments":{"sticker_id":"st_dog26_012"}}}' \
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
             --output "$response_file"
-          grep -q 'st_control_001' "$response_file"
+          grep -q 'st_dog26_012' "$response_file"
           grep -q 'structuredContent' "$response_file"
 
       - name: Verify widget resource metadata
