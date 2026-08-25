@@ -201,6 +201,29 @@ jobs:
             --output "$response_file"
           grep -q 'https://web-sandbox.oaiusercontent.com' "$response_file"
           grep -q "https://${PROJECT_ID}.supabase.co" "$response_file"
-          grep -q '@modelcontextprotocol/ext-apps@1.7.5/app-with-deps' "$response_file"
-          grep -q 'app.connect()' "$response_file"
+          grep -q 'ui/initialize' "$response_file"
+          grep -q 'ui/notifications/initialized' "$response_file"
           grep -q 'widget-data?sticker_id=' "$response_file"
+
+      - name: Verify cached widget URI compatibility
+        if: steps.secrets.outputs.ready == 'true'
+        shell: bash
+        run: |
+          for resource_uri in \
+            'ui://sticker-mcp/sticker.html' \
+            'ui://sticker-mcp/sticker-v2.html' \
+            'ui://sticker-mcp/sticker-v3.html'; do
+            response_file="$(mktemp)"
+            payload="$(jq -nc --arg uri "$resource_uri" \
+              '{jsonrpc:"2.0",id:41,method:"resources/read",params:{uri:$uri}}')"
+            curl --fail --silent --show-error --location \
+              --retry 5 --retry-all-errors --retry-delay 3 --max-time 45 \
+              --request POST \
+              --header "Content-Type: application/json" \
+              --header "Accept: application/json, text/event-stream" \
+              --data "$payload" \
+              "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
+              --output "$response_file"
+            grep -q "$resource_uri" "$response_file"
+            grep -q 'text/html;profile=mcp-app' "$response_file"
+          done
