@@ -129,7 +129,7 @@ function clean(row: StickerRow): StickerCandidate {
   };
 }
 
-async function fetchEnabledStickers(limit = 500): Promise<StickerRow[]> {
+async function fetchEnabledStickers(): Promise<StickerRow[]> {
   const columns = [
     "id",
     "public_url",
@@ -148,22 +148,31 @@ async function fetchEnabledStickers(limit = 500): Promise<StickerRow[]> {
     "assistant_enabled",
   ].join(",");
 
-  const url =
-    `${normalizedOrigin()}/rest/v1/sticker_catalog` +
-    `?assistant_enabled=eq.true&select=${encodeURIComponent(columns)}` +
-    `&limit=${Math.max(1, Math.min(limit, 1000))}`;
+  const pageSize = 1000;
+  const rows: StickerRow[] = [];
 
-  const response = await fetch(url, {
-    headers: authHeaders(),
-  });
+  for (let offset = 0; offset < 10_000; offset += pageSize) {
+    const url =
+      `${normalizedOrigin()}/rest/v1/sticker_catalog` +
+      `?assistant_enabled=eq.true&select=${encodeURIComponent(columns)}` +
+      `&order=id.asc&limit=${pageSize}&offset=${offset}`;
 
-  if (!response.ok) {
-    throw new Error(
-      `Supabase sticker_catalog query failed: ${response.status} ${await response.text()}`,
-    );
+    const response = await fetch(url, {
+      headers: authHeaders(),
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `Supabase sticker_catalog query failed: ${response.status} ${await response.text()}`,
+      );
+    }
+
+    const page: StickerRow[] = await response.json();
+    rows.push(...page);
+    if (page.length < pageSize) break;
   }
 
-  return await response.json();
+  return rows;
 }
 
 async function fetchStickerById(id: string): Promise<StickerRow | null> {

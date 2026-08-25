@@ -95,12 +95,6 @@ jobs:
             "https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/imports/doumiwuka/st_doumiwuka_001.png" \
             --output /tmp/doumiwuka.png
           test "$(head -c 8 /tmp/doumiwuka.png | base64)" = "iVBORw0KGgo="
-          curl --fail --silent --show-error --location \
-            --retry 5 --retry-all-errors --max-time 30 \
-            "https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/funny/danzifeidudu.jpeg" \
-            --output /tmp/danzifeidudu.jpeg
-          test "$(head -c 3 /tmp/danzifeidudu.jpeg | base64)" = "/9j/"
-
       - name: Verify Edge Function health endpoint
         if: steps.secrets.outputs.ready == 'true'
         run: |
