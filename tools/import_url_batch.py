@@ -17,7 +17,15 @@ BASE_DIR = Path(__file__).resolve().parent
 MANIFEST = BASE_DIR / "sticker-url-batch.json"
 BUCKET = "stickers"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
-ALLOWED_SOURCE_HOSTS = {"pic1.imgdb.cn", "iili.io"}
+ALLOWED_SOURCE_HOSTS = {
+    "pic1.imgdb.cn",
+    "iili.io",
+    "s41.ax1x.com",
+    "imgbed.heliar.top",
+    "img.heliar.top",
+    "i.postimg.cc",
+    "i.imgant.com",
+}
 WORKERS = 8
 
 
@@ -265,22 +273,37 @@ def load_rows() -> list[dict]:
 def main() -> int:
     rows = load_rows()
     uploaded = 0
+    completed_rows = []
+    failures = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
         futures = [pool.submit(mirror_one, row) for row in rows]
         for completed, future in enumerate(
             concurrent.futures.as_completed(futures), start=1
         ):
-            row, was_uploaded = future.result()
+            try:
+                row, was_uploaded = future.result()
+            except Exception as error:  # noqa: BLE001 - one dead source must not block deployment
+                failures.append(str(error))
+                print(f"[{completed:03d}/{len(rows)}] 跳过失败来源：{error}")
+                continue
+            completed_rows.append(row)
             uploaded += int(was_uploaded)
             action = "上传" if was_uploaded else "复用"
             print(f"[{completed:03d}/{len(rows)}] {action} {row['id']}")
 
-    upsert_rows(rows)
+    if not completed_rows:
+        raise RuntimeError("没有任何表情包可成功导入")
+
+    upsert_rows(completed_rows)
     print(
-        f"完成：目录 {len(rows)} 条；新上传 {uploaded} 张；"
-        f"已存在 {len(rows) - uploaded} 张。"
+        f"完成：目录 {len(completed_rows)} 条；新上传 {uploaded} 张；"
+        f"已存在 {len(completed_rows) - uploaded} 张；失败 {len(failures)} 张。"
     )
+    if failures:
+        print("失败来源会在下一次部署时自动重试：")
+        for failure in failures:
+            print(f"- {failure}")
     return 0
 
 

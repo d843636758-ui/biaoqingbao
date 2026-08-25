@@ -20,7 +20,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       PROJECT_ID: cqoevridrpdgqjyiksok
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
@@ -90,6 +90,11 @@ jobs:
             --output /tmp/whitecat.gif
           test -s /tmp/whitecat.gif
           test "$(head -c 3 /tmp/whitecat.gif)" = "GIF"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --max-time 30 \
+            "https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/imports/doumiwuka/st_doumiwuka_001.png" \
+            --output /tmp/doumiwuka.png
+          test "$(head -c 8 /tmp/doumiwuka.png | base64)" = "iVBORw0KGgo="
 
       - name: Verify Edge Function health endpoint
         if: steps.secrets.outputs.ready == 'true'
