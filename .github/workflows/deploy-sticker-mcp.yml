@@ -73,3 +73,17 @@ jobs:
           curl --fail --silent --show-error --location \
             --retry 8 --retry-all-errors --retry-delay 3 --max-time 30 \
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp"
+
+      - name: Verify MCP initialize handshake
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          response_file="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --max-time 45 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json, text/event-stream" \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"github-actions-smoke-test","version":"1.0.0"}}}' \
+            "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
+            --output "$response_file"
+          grep -Eq '"protocolVersion"|"serverInfo"' "$response_file"
