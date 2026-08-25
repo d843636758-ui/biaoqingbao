@@ -35,13 +35,14 @@ const STICKER_ALT =
 // 一般不要动下面这些
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SERVER_VERSION = "1.6.0";
+const SERVER_VERSION = "1.7.0";
 // Keep every previously advertised UI URI readable. ChatGPT can retain a tool
 // descriptor for an existing conversation, so removing an older URI makes the
 // host fail before the iframe is even created ("Failed to fetch template").
-const TEMPLATE_URI = "ui://sticker-mcp/sticker-v3.html";
+const TEMPLATE_URI = "ui://sticker-mcp/sticker-v4.html";
 const TEMPLATE_URIS = [
   TEMPLATE_URI,
+  "ui://sticker-mcp/sticker-v3.html",
   "ui://sticker-mcp/sticker-v2.html",
   "ui://sticker-mcp/sticker.html",
 ] as const;
@@ -404,11 +405,13 @@ const WIDGET_HTML = String.raw`<!doctype html>
     html, body {
       margin: 0;
       padding: 0;
+      min-height: 48px;
       background: transparent;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     .wrap {
       width: 100%;
+      min-height: 48px;
       display: flex;
       justify-content: flex-start;
       padding: 2px;
@@ -466,6 +469,9 @@ const WIDGET_HTML = String.raw`<!doctype html>
       const error = document.getElementById("error");
       let rendered = false;
       let fallbackStickerId = "";
+      let lastPayload = null;
+      let lastSavedState = "";
+      let heightFrame = 0;
 
       // MCP Apps bridge is kept inline so iOS never has to download a runtime
       // module before it can receive the initial tool result. v1.5 used
@@ -499,9 +505,10 @@ const WIDGET_HTML = String.raw`<!doctype html>
           await requestBridge("ui/initialize", {
             protocolVersion: "2026-01-26",
             appCapabilities: {},
-            clientInfo: { name: "sticker-viewer", version: "1.6.0" }
+            clientInfo: { name: "sticker-viewer", version: "1.7.0" }
           });
           notifyBridge("ui/notifications/initialized", {});
+          reportHeight();
         } catch (_) {
           // Legacy window.openai and widget-data fallbacks remain active.
         }
@@ -512,6 +519,10 @@ const WIDGET_HTML = String.raw`<!doctype html>
         if (typeof value.url === "string" && value.url) return value;
 
         const candidates = [
+          value.widgetState,
+          value.privateContent,
+          value.sticker,
+          value.state,
           value.structuredContent,
           value.toolOutput,
           value.toolResponseMetadata,
@@ -551,6 +562,49 @@ const WIDGET_HTML = String.raw`<!doctype html>
         return "";
       }
 
+      function reportHeight() {
+        if (heightFrame) window.cancelAnimationFrame(heightFrame);
+        heightFrame = window.requestAnimationFrame(() => {
+          heightFrame = 0;
+          const root = document.documentElement;
+          const body = document.body;
+          const width = Math.ceil(Math.max(root.scrollWidth, body.scrollWidth));
+          const height = Math.ceil(
+            Math.max(48, root.scrollHeight, body.scrollHeight)
+          );
+
+          // Portable MCP Apps hosts consume this notification. ChatGPT also
+          // exposes notifyIntrinsicHeight as a compatibility extension.
+          notifyBridge("ui/notifications/size-changed", { width, height });
+          try {
+            if (window.openai && window.openai.notifyIntrinsicHeight) {
+              window.openai.notifyIntrinsicHeight();
+            }
+          } catch (_) {}
+        });
+      }
+
+      function persistPayload(data) {
+        const payload = {
+          url: data.url,
+          alt: typeof data.alt === "string" ? data.alt : "表情包",
+          caption: typeof data.caption === "string" ? data.caption : "",
+          sticker_id:
+            typeof data.sticker_id === "string" ? data.sticker_id : ""
+        };
+        const serialized = JSON.stringify(payload);
+        if (serialized === lastSavedState) return;
+
+        try {
+          if (window.openai && window.openai.setWidgetState) {
+            // This snapshot belongs to the rendered card. It lets ChatGPT
+            // reconstruct the image when iOS rehydrates the conversation.
+            window.openai.setWidgetState({ sticker: payload });
+            lastSavedState = serialized;
+          }
+        } catch (_) {}
+      }
+
       function render(value) {
         const data = extractPayload(value, 0);
         if (!data) return false;
@@ -562,7 +616,17 @@ const WIDGET_HTML = String.raw`<!doctype html>
         if (!url) return false;
 
         rendered = true;
+        lastPayload = {
+          url,
+          alt,
+          caption: cap,
+          sticker_id:
+            typeof data.sticker_id === "string" ? data.sticker_id : ""
+        };
         img.alt = alt;
+        loading.style.display = img.complete && img.naturalWidth ? "none" : "block";
+        error.style.display = "none";
+        img.style.display = "block";
         img.src = url;
 
         if (cap) {
@@ -570,6 +634,9 @@ const WIDGET_HTML = String.raw`<!doctype html>
           // 默认不占空间；如果你以后想显示说明，把下一行改成 "block"。
           caption.style.display = "none";
         }
+
+        persistPayload(lastPayload);
+        reportHeight();
 
         return true;
       }
@@ -596,16 +663,19 @@ const WIDGET_HTML = String.raw`<!doctype html>
         loading.style.display = "none";
         error.style.display = "none";
         img.style.display = "block";
+        reportHeight();
       });
 
       img.addEventListener("error", () => {
         loading.style.display = "none";
         img.style.display = "none";
         error.style.display = "block";
+        reportHeight();
       });
 
       // ChatGPT Apps SDK 兼容层：先读当前 toolOutput。
       try {
+        render(window.openai && window.openai.widgetState);
         render(window.openai && window.openai.toolOutput);
         render(window.openai && window.openai.toolResponseMetadata);
         renderFromToolInput(window.openai);
@@ -617,6 +687,7 @@ const WIDGET_HTML = String.raw`<!doctype html>
         (event) => {
           try {
             const globals = event && event.detail && event.detail.globals;
+            render(globals && globals.widgetState);
             render(globals);
             render(window.openai);
             renderFromToolInput(globals);
@@ -656,16 +727,49 @@ const WIDGET_HTML = String.raw`<!doctype html>
 
       connectBridge();
 
+      // Rehydrate after iOS scroll recycling, returning from background, or
+      // transcript restoration. The server remains the source of truth; the
+      // widget snapshot only prevents a visible card from disappearing.
+      function restoreAndResize() {
+        try {
+          render(window.openai && window.openai.widgetState);
+          render(window.openai && window.openai.toolOutput);
+          render(window.openai && window.openai.toolResponseMetadata);
+          if (!rendered && lastPayload) render(lastPayload);
+          renderFromToolInput(window.openai);
+        } catch (_) {}
+        reportHeight();
+      }
+
+      window.addEventListener("pageshow", restoreAndResize, { passive: true });
+      window.addEventListener("focus", restoreAndResize, { passive: true });
+      document.addEventListener(
+        "visibilitychange",
+        () => {
+          if (!document.hidden) restoreAndResize();
+        },
+        { passive: true }
+      );
+
+      if (typeof ResizeObserver !== "undefined") {
+        const resizeObserver = new ResizeObserver(reportHeight);
+        resizeObserver.observe(document.body);
+      }
+
       // Some mobile clients attach the bridge after the document has loaded.
       // Brief polling avoids a permanent blank card without making requests.
       let attempts = 0;
       const timer = window.setInterval(() => {
         attempts += 1;
         try {
+          render(window.openai && window.openai.widgetState);
           render(window.openai);
           renderFromToolInput(window.openai);
         } catch (_) {}
-        if (rendered || attempts >= 150) window.clearInterval(timer);
+        if (rendered || attempts >= 150) {
+          window.clearInterval(timer);
+          reportHeight();
+        }
       }, 100);
     })();
   </script>
