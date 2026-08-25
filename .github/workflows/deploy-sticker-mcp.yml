@@ -112,6 +112,22 @@ jobs:
             --output "$response_file"
           grep -Eq '"protocolVersion"|"serverInfo"' "$response_file"
 
+      - name: Verify send_sticker descriptor contract
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          response_file="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --max-time 45 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json, text/event-stream" \
+            --data '{"jsonrpc":"2.0","id":11,"method":"tools/list","params":{}}' \
+            "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
+            --output "$response_file"
+          grep -q 'send_sticker' "$response_file"
+          grep -q 'outputSchema' "$response_file"
+          grep -q 'ui://sticker-mcp/sticker-v2.html' "$response_file"
+
       - name: Verify search_stickers tool call
         if: steps.secrets.outputs.ready == 'true'
         run: |
@@ -155,6 +171,17 @@ jobs:
           grep -q 'st_whitecat_001' "$response_file"
           grep -q 'structuredContent' "$response_file"
 
+      - name: Verify mobile widget fallback endpoint
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          response_file="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --max-time 45 \
+            "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/widget-data?sticker_id=st_whitecat_001" \
+            --output "$response_file"
+          grep -q 'st_whitecat_001' "$response_file"
+          grep -q '/storage/v1/object/public/stickers/imports/whitecat/' "$response_file"
+
       - name: Verify widget resource metadata
         if: steps.secrets.outputs.ready == 'true'
         run: |
@@ -164,8 +191,9 @@ jobs:
             --request POST \
             --header "Content-Type: application/json" \
             --header "Accept: application/json, text/event-stream" \
-            --data '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"ui://sticker-mcp/sticker.html"}}' \
+            --data '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"ui://sticker-mcp/sticker-v2.html"}}' \
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
             --output "$response_file"
           grep -q 'https://web-sandbox.oaiusercontent.com' "$response_file"
           grep -q "https://${PROJECT_ID}.supabase.co" "$response_file"
+          grep -q 'widget-data?sticker_id=' "$response_file"

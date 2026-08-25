@@ -35,8 +35,10 @@ const STICKER_ALT =
 // 一般不要动下面这些
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SERVER_VERSION = "1.2.0";
-const TEMPLATE_URI = "ui://sticker-mcp/sticker.html";
+const SERVER_VERSION = "1.3.0";
+// UI resource URIs are cache keys. Increment this whenever the component
+// contract or embedded HTML changes so mobile clients cannot reuse stale UI.
+const TEMPLATE_URI = "ui://sticker-mcp/sticker-v2.html";
 // ChatGPT hosts MCP UI resources in this sandbox. Supabase is only the image
 // origin; using it as the widget origin makes iOS request an invalid Supabase
 // route such as /ui://sticker-mcp/sticker.html.
@@ -343,6 +345,38 @@ async function createStickerContent(
   return result;
 }
 
+function buildStickerPayload(stickerId: string, row: StickerRow | null) {
+  let url = fallbackStickerUrl();
+  let alt = STICKER_ALT;
+  let caption = `sticker_id: ${stickerId}`;
+
+  if (row) {
+    const sticker = clean(row);
+    url = sticker.public_url || fallbackStickerUrl();
+    alt =
+      sticker.ocr_text ||
+      sticker.semantic_intent ||
+      sticker.visual_description ||
+      STICKER_ALT;
+    caption = [
+      sticker.ocr_text,
+      sticker.semantic_intent,
+      sticker.tone_tags.length ? `语气：${sticker.tone_tags.join("、")}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  } else {
+    caption = `没有查到 ${stickerId}，已显示控制组兜底图片。`;
+  }
+
+  return {
+    url,
+    alt,
+    caption,
+    sticker_id: stickerId,
+  };
+}
+
 const WIDGET_HTML = String.raw`<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -416,6 +450,7 @@ const WIDGET_HTML = String.raw`<!doctype html>
       const loading = document.getElementById("loading");
       const error = document.getElementById("error");
       let rendered = false;
+      let fallbackStickerId = "";
 
       function extractPayload(value, depth) {
         if (!value || typeof value !== "object" || depth > 5) return null;
@@ -424,6 +459,7 @@ const WIDGET_HTML = String.raw`<!doctype html>
         const candidates = [
           value.structuredContent,
           value.toolOutput,
+          value.toolResponseMetadata,
           value.result,
           value.mcp_tool_result,
           value.call_tool_result,
@@ -436,6 +472,28 @@ const WIDGET_HTML = String.raw`<!doctype html>
         }
 
         return null;
+      }
+
+      function extractStickerId(value, depth) {
+        if (!value || typeof value !== "object" || depth > 5) return "";
+        if (typeof value.sticker_id === "string") return value.sticker_id;
+
+        const candidates = [
+          value.toolInput,
+          value.arguments,
+          value.params,
+          value.structuredContent,
+          value.result,
+          value.mcp_tool_result,
+          value.call_tool_result
+        ];
+
+        for (const candidate of candidates) {
+          const stickerId = extractStickerId(candidate, depth + 1);
+          if (stickerId) return stickerId;
+        }
+
+        return "";
       }
 
       function render(value) {
@@ -461,6 +519,24 @@ const WIDGET_HTML = String.raw`<!doctype html>
         return true;
       }
 
+      async function renderFromToolInput(value) {
+        const stickerId = extractStickerId(value, 0);
+        if (!stickerId || rendered || fallbackStickerId === stickerId) return;
+
+        fallbackStickerId = stickerId;
+        try {
+          const endpoint =
+            "https://cqoevridrpdgqjyiksok.supabase.co/functions/v1/" +
+            "sticker-mcp/widget-data?sticker_id=" +
+            encodeURIComponent(stickerId);
+          const response = await fetch(endpoint, { method: "GET" });
+          if (!response.ok) throw new Error("widget fallback failed");
+          render(await response.json());
+        } catch (_) {
+          fallbackStickerId = "";
+        }
+      }
+
       img.addEventListener("load", () => {
         loading.style.display = "none";
         error.style.display = "none";
@@ -476,6 +552,8 @@ const WIDGET_HTML = String.raw`<!doctype html>
       // ChatGPT Apps SDK 兼容层：先读当前 toolOutput。
       try {
         render(window.openai && window.openai.toolOutput);
+        render(window.openai && window.openai.toolResponseMetadata);
+        renderFromToolInput(window.openai);
       } catch (_) {}
 
       // 当 ChatGPT 把 structuredContent 更新进 widget 时再渲染。
@@ -486,6 +564,8 @@ const WIDGET_HTML = String.raw`<!doctype html>
             const globals = event && event.detail && event.detail.globals;
             render(globals);
             render(window.openai);
+            renderFromToolInput(globals);
+            renderFromToolInput(window.openai);
           } catch (_) {}
         },
         { passive: true }
@@ -498,9 +578,15 @@ const WIDGET_HTML = String.raw`<!doctype html>
           if (event.source !== window.parent) return;
           const message = event.data;
           if (!message || message.jsonrpc !== "2.0") return;
-          if (message.method !== "ui/notifications/tool-result") return;
 
-          try { render(message.params); } catch (_) {}
+          try {
+            if (message.method === "ui/notifications/tool-result") {
+              render(message.params);
+            }
+            if (message.method === "ui/notifications/tool-input") {
+              renderFromToolInput(message.params);
+            }
+          } catch (_) {}
         },
         { passive: true }
       );
@@ -510,8 +596,11 @@ const WIDGET_HTML = String.raw`<!doctype html>
       let attempts = 0;
       const timer = window.setInterval(() => {
         attempts += 1;
-        try { render(window.openai); } catch (_) {}
-        if (rendered || attempts >= 40) window.clearInterval(timer);
+        try {
+          render(window.openai);
+          renderFromToolInput(window.openai);
+        } catch (_) {}
+        if (rendered || attempts >= 150) window.clearInterval(timer);
       }, 100);
     })();
   </script>
@@ -595,6 +684,12 @@ function createServer(): McpServer {
           .min(1)
           .describe("必须来自 search_stickers.candidates[].id"),
       },
+      outputSchema: {
+        url: z.string().url(),
+        alt: z.string(),
+        caption: z.string(),
+        sticker_id: z.string(),
+      },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -603,47 +698,21 @@ function createServer(): McpServer {
       _meta: {
         ui: {
           resourceUri: TEMPLATE_URI,
+          visibility: ["model", "app"],
         },
         // Compatibility alias used by older ChatGPT mobile clients.
         "openai/outputTemplate": TEMPLATE_URI,
+        "openai/toolInvocation/invoking": "正在加载表情包…",
+        "openai/toolInvocation/invoked": "表情包已就绪",
       },
     },
     async ({ sticker_id }) => {
       const row = await fetchStickerById(sticker_id);
-
-      let url = fallbackStickerUrl();
-      let alt = STICKER_ALT;
-      let caption = `sticker_id: ${sticker_id}`;
-
-      if (row) {
-        const s = clean(row);
-        url = s.public_url || fallbackStickerUrl();
-        alt =
-          s.ocr_text ||
-          s.semantic_intent ||
-          s.visual_description ||
-          STICKER_ALT;
-
-        caption = [
-          s.ocr_text,
-          s.semantic_intent,
-          s.tone_tags.length ? `语气：${s.tone_tags.join("、")}` : "",
-        ]
-          .filter(Boolean)
-          .join(" · ");
-      } else {
-        caption =
-          `没有查到 ${sticker_id}，已显示控制组兜底图片。`;
-      }
+      const payload = buildStickerPayload(sticker_id, row);
 
       return {
-        structuredContent: {
-          url,
-          alt,
-          caption,
-          sticker_id,
-        },
-        content: await createStickerContent(url, alt),
+        structuredContent: payload,
+        content: await createStickerContent(payload.url, payload.alt),
       };
     },
   );
@@ -667,7 +736,7 @@ function createServer(): McpServer {
               domain: WIDGET_SANDBOX_ORIGIN,
               csp: {
                 resourceDomains: [normalizedOrigin()],
-                connectDomains: [],
+                connectDomains: [normalizedOrigin()],
               },
             },
             // Keep the legacy aliases for ChatGPT clients that have not yet
@@ -677,7 +746,7 @@ function createServer(): McpServer {
             "openai/widgetDomain": WIDGET_SANDBOX_ORIGIN,
             "openai/widgetCSP": {
               resource_domains: [normalizedOrigin()],
-              connect_domains: [],
+              connect_domains: [normalizedOrigin()],
             },
           },
         },
@@ -726,6 +795,39 @@ async function handleMcp(request: Request): Promise<Response> {
   });
 }
 
+async function handleWidgetData(url: URL): Promise<Response> {
+  const stickerId = url.searchParams.get("sticker_id")?.trim() ?? "";
+
+  if (!/^st_[a-z0-9_-]{1,80}$/.test(stickerId)) {
+    return new Response(JSON.stringify({ error: "invalid sticker_id" }), {
+      status: 400,
+      headers: corsHeaders(
+        new Headers({ "content-type": "application/json; charset=utf-8" }),
+      ),
+    });
+  }
+
+  const row = await fetchStickerById(stickerId);
+  if (!row) {
+    return new Response(JSON.stringify({ error: "sticker not found" }), {
+      status: 404,
+      headers: corsHeaders(
+        new Headers({ "content-type": "application/json; charset=utf-8" }),
+      ),
+    });
+  }
+
+  return new Response(JSON.stringify(buildStickerPayload(stickerId, row)), {
+    status: 200,
+    headers: corsHeaders(
+      new Headers({
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "public, max-age=300",
+      }),
+    ),
+  });
+}
+
 Deno.serve(async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
 
@@ -756,6 +858,20 @@ Deno.serve(async (request: Request): Promise<Response> => {
           ),
         },
       );
+    }
+  }
+
+  if (request.method === "GET" && url.pathname.endsWith("/widget-data")) {
+    try {
+      return await handleWidgetData(url);
+    } catch (error) {
+      console.error("[sticker widget-data error]", error);
+      return new Response(JSON.stringify({ error: "widget data failed" }), {
+        status: 500,
+        headers: corsHeaders(
+          new Headers({ "content-type": "application/json; charset=utf-8" }),
+        ),
+      });
     }
   }
 
