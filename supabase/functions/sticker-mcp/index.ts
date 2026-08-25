@@ -35,7 +35,7 @@ const STICKER_ALT =
 // 一般不要动下面这些
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SERVER_VERSION = "1.3.0";
+const SERVER_VERSION = "1.4.0";
 // UI resource URIs are cache keys. Increment this whenever the component
 // contract or embedded HTML changes so mobile clients cannot reuse stale UI.
 const TEMPLATE_URI = "ui://sticker-mcp/sticker-v2.html";
@@ -679,9 +679,10 @@ function createServer(): McpServer {
     },
   );
 
-  // 重要：只有 send_sticker 是 App Tool，并绑定图片 UI。
-  registerAppTool(
-    server,
+  // send_sticker 直接返回标准 MCP image content，由各端原生渲染。
+  // iOS 对自定义 widget bridge 的支持存在版本差异；不绑定模板可以避免
+  // 工具结果已成功但组件一直停在“正在加载”的情况。
+  server.registerTool(
     "send_sticker",
     {
       title: "发送表情包",
@@ -703,16 +704,6 @@ function createServer(): McpServer {
         readOnlyHint: true,
         destructiveHint: false,
         openWorldHint: false,
-      },
-      _meta: {
-        ui: {
-          resourceUri: TEMPLATE_URI,
-          visibility: ["model", "app"],
-        },
-        // Compatibility alias used by older ChatGPT mobile clients.
-        "openai/outputTemplate": TEMPLATE_URI,
-        "openai/toolInvocation/invoking": "正在加载表情包…",
-        "openai/toolInvocation/invoked": "表情包已就绪",
       },
     },
     async ({ sticker_id }) => {

@@ -106,7 +106,7 @@ jobs:
             --output "$response_file"
           grep -q 'send_sticker' "$response_file"
           grep -q 'outputSchema' "$response_file"
-          grep -q 'ui://sticker-mcp/sticker-v2.html' "$response_file"
+          ! grep -q 'openai/outputTemplate' "$response_file"
 
       - name: Verify search_stickers tool call
         if: steps.secrets.outputs.ready == 'true'
