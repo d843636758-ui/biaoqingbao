@@ -106,7 +106,7 @@ jobs:
             --output "$response_file"
           grep -q 'send_sticker' "$response_file"
           grep -q 'outputSchema' "$response_file"
-          ! grep -q 'openai/outputTemplate' "$response_file"
+          grep -q 'ui://sticker-mcp/sticker-v3.html' "$response_file"
 
       - name: Verify search_stickers tool call
         if: steps.secrets.outputs.ready == 'true'
@@ -196,9 +196,11 @@ jobs:
             --request POST \
             --header "Content-Type: application/json" \
             --header "Accept: application/json, text/event-stream" \
-            --data '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"ui://sticker-mcp/sticker-v2.html"}}' \
+            --data '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"ui://sticker-mcp/sticker-v3.html"}}' \
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
             --output "$response_file"
           grep -q 'https://web-sandbox.oaiusercontent.com' "$response_file"
           grep -q "https://${PROJECT_ID}.supabase.co" "$response_file"
+          grep -q '@modelcontextprotocol/ext-apps@1.7.5/app-with-deps' "$response_file"
+          grep -q 'app.connect()' "$response_file"
           grep -q 'widget-data?sticker_id=' "$response_file"

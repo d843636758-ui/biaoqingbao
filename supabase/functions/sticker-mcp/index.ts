@@ -35,10 +35,10 @@ const STICKER_ALT =
 // 一般不要动下面这些
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SERVER_VERSION = "1.4.0";
+const SERVER_VERSION = "1.5.0";
 // UI resource URIs are cache keys. Increment this whenever the component
 // contract or embedded HTML changes so mobile clients cannot reuse stale UI.
-const TEMPLATE_URI = "ui://sticker-mcp/sticker-v2.html";
+const TEMPLATE_URI = "ui://sticker-mcp/sticker-v3.html";
 // ChatGPT hosts MCP UI resources in this sandbox. Supabase is only the image
 // origin; using it as the widget origin makes iOS request an invalid Supabase
 // route such as /ui://sticker-mcp/sticker.html.
@@ -452,7 +452,9 @@ const WIDGET_HTML = String.raw`<!doctype html>
     </div>
   </div>
 
-  <script>
+  <script type="module">
+    import { App } from "https://esm.sh/@modelcontextprotocol/ext-apps@1.7.5/app-with-deps";
+
     (() => {
       const img = document.getElementById("sticker");
       const caption = document.getElementById("caption");
@@ -460,6 +462,20 @@ const WIDGET_HTML = String.raw`<!doctype html>
       const error = document.getElementById("error");
       let rendered = false;
       let fallbackStickerId = "";
+
+      // Standard MCP Apps bridge. Register one-shot handlers before connect()
+      // so mobile hosts cannot deliver the initial tool result too early.
+      const app = new App(
+        { name: "sticker-viewer", version: "1.5.0" },
+        {},
+        { autoResize: true }
+      );
+      app.ontoolresult = (result) => {
+        try { render(result); } catch (_) {}
+      };
+      app.ontoolinput = (input) => {
+        try { renderFromToolInput(input); } catch (_) {}
+      };
 
       function extractPayload(value, depth) {
         if (!value || typeof value !== "object" || depth > 5) return null;
@@ -564,6 +580,10 @@ const WIDGET_HTML = String.raw`<!doctype html>
         render(window.openai && window.openai.toolResponseMetadata);
         renderFromToolInput(window.openai);
       } catch (_) {}
+
+      app.connect().catch(() => {
+        // Legacy window.openai and widget-data fallbacks remain active below.
+      });
 
       // 当 ChatGPT 把 structuredContent 更新进 widget 时再渲染。
       window.addEventListener(
@@ -679,10 +699,10 @@ function createServer(): McpServer {
     },
   );
 
-  // send_sticker 直接返回标准 MCP image content，由各端原生渲染。
-  // iOS 对自定义 widget bridge 的支持存在版本差异；不绑定模板可以避免
-  // 工具结果已成功但组件一直停在“正在加载”的情况。
-  server.registerTool(
+  // send_sticker 同时提供标准 MCP image content 与 MCP Apps URL 组件：
+  // 原生图片是后备，组件通过标准 ui/initialize 桥跨端接收结果。
+  registerAppTool(
+    server,
     "send_sticker",
     {
       title: "发送表情包",
@@ -704,6 +724,15 @@ function createServer(): McpServer {
         readOnlyHint: true,
         destructiveHint: false,
         openWorldHint: false,
+      },
+      _meta: {
+        ui: {
+          resourceUri: TEMPLATE_URI,
+          visibility: ["model", "app"],
+        },
+        "openai/outputTemplate": TEMPLATE_URI,
+        "openai/toolInvocation/invoking": "正在加载表情包…",
+        "openai/toolInvocation/invoked": "表情包已就绪",
       },
     },
     async ({ sticker_id }) => {
@@ -735,7 +764,7 @@ function createServer(): McpServer {
               prefersBorder: false,
               domain: WIDGET_SANDBOX_ORIGIN,
               csp: {
-                resourceDomains: [normalizedOrigin()],
+                resourceDomains: [normalizedOrigin(), "https://esm.sh"],
                 connectDomains: [normalizedOrigin()],
               },
             },
@@ -745,7 +774,7 @@ function createServer(): McpServer {
             "openai/widgetDescription": "显示 send_sticker 选中的真实表情包图片。",
             "openai/widgetDomain": WIDGET_SANDBOX_ORIGIN,
             "openai/widgetCSP": {
-              resource_domains: [normalizedOrigin()],
+              resource_domains: [normalizedOrigin(), "https://esm.sh"],
               connect_domains: [normalizedOrigin()],
             },
           },
