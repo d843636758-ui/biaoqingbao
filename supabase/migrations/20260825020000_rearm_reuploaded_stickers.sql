@@ -1,14 +1,6 @@
--- Automatically mirror image objects from Storage bucket `stickers` into
--- public.sticker_catalog. Newly discovered images stay disabled until the MCP
--- has inspected the pixels and written useful Chinese metadata.
-
-alter table public.sticker_catalog
-  add column if not exists metadata_status text not null default 'ready',
-  add column if not exists auto_registered boolean not null default false,
-  add column if not exists metadata_updated_at timestamptz;
-
-create index if not exists sticker_catalog_metadata_status_idx
-  on public.sticker_catalog (metadata_status, created_at);
+-- The first production smoke test deliberately deleted its temporary object.
+-- Re-uploading the same path must put an auto-registered row back into the
+-- pending queue instead of leaving it in the deleted state.
 
 create or replace function public.sync_storage_sticker_to_catalog()
 returns trigger
@@ -52,7 +44,6 @@ begin
 
   object_name := new.name;
   object_ext := lower(substring(object_name from '\.([^.]+)$'));
-
   if object_ext not in ('jpg', 'jpeg', 'png', 'gif', 'webp') then
     return new;
   end if;
@@ -76,8 +67,6 @@ begin
   from unnest(string_to_array(object_name, '/')) as part;
   generated_id := 'st_auto_' || substring(md5(new.bucket_id || ':' || object_name), 1, 20);
 
-  -- Preserve curated metadata when a known object is overwritten. Only a
-  -- genuinely new Storage path enters the pending review queue.
   update public.sticker_catalog
   set public_url = object_url,
       filename = regexp_replace(object_name, '^.*/', ''),
@@ -100,24 +89,10 @@ begin
 
   if not found then
     insert into public.sticker_catalog (
-      id,
-      public_url,
-      filename,
-      storage_path,
-      mime_type,
-      animated,
-      ocr_text,
-      visual_description,
-      semantic_intent,
-      tone_tags,
-      use_intents,
-      avoid_when,
-      confidence,
-      is_adult,
-      assistant_enabled,
-      metadata_status,
-      auto_registered,
-      metadata_updated_at
+      id, public_url, filename, storage_path, mime_type, animated,
+      ocr_text, visual_description, semantic_intent, tone_tags,
+      use_intents, avoid_when, confidence, is_adult, assistant_enabled,
+      metadata_status, auto_registered, metadata_updated_at
     ) values (
       generated_id,
       object_url,
@@ -144,6 +119,9 @@ begin
       storage_path = excluded.storage_path,
       mime_type = excluded.mime_type,
       animated = excluded.animated,
+      metadata_status = 'pending',
+      assistant_enabled = false,
+      metadata_updated_at = null,
       updated_at = now();
   end if;
 
@@ -151,77 +129,3 @@ begin
 end;
 $$;
 
-drop trigger if exists sticker_catalog_storage_insert_update on storage.objects;
-create trigger sticker_catalog_storage_insert_update
-after insert or update of bucket_id, name, metadata
-on storage.objects
-for each row
-execute function public.sync_storage_sticker_to_catalog();
-
-drop trigger if exists sticker_catalog_storage_delete on storage.objects;
-create trigger sticker_catalog_storage_delete
-after delete
-on storage.objects
-for each row
-execute function public.sync_storage_sticker_to_catalog();
-
--- Backfill image objects that were uploaded before this trigger existed. Rows
--- already imported by the curated URL pipeline are left untouched.
-insert into public.sticker_catalog (
-  id,
-  public_url,
-  filename,
-  storage_path,
-  mime_type,
-  animated,
-  ocr_text,
-  visual_description,
-  semantic_intent,
-  tone_tags,
-  use_intents,
-  avoid_when,
-  confidence,
-  is_adult,
-  assistant_enabled,
-  metadata_status,
-  auto_registered
-)
-select
-  'st_auto_' || substring(md5(o.bucket_id || ':' || o.name), 1, 20),
-  'https://cqoevridrpdgqjyiksok.supabase.co/storage/v1/object/public/stickers/' ||
-    (select string_agg(
-      replace(replace(replace(replace(part, '%', '%25'), ' ', '%20'), '#', '%23'), '?', '%3F'),
-      '/'
-    ) from unnest(string_to_array(o.name, '/')) as part),
-  regexp_replace(o.name, '^.*/', ''),
-  o.name,
-  coalesce(
-    nullif(o.metadata ->> 'mimetype', ''),
-    case lower(substring(o.name from '\.([^.]+)$'))
-      when 'png' then 'image/png'
-      when 'gif' then 'image/gif'
-      when 'webp' then 'image/webp'
-      else 'image/jpeg'
-    end
-  ),
-  lower(substring(o.name from '\.([^.]+)$')) = 'gif',
-  '',
-  '待识别的新上传表情包',
-  '待识别',
-  array['待识别'],
-  array[]::text[],
-  array[]::text[],
-  0,
-  false,
-  false,
-  'pending',
-  true
-from storage.objects o
-where o.bucket_id = 'stickers'
-  and lower(substring(o.name from '\.([^.]+)$')) in ('jpg', 'jpeg', 'png', 'gif', 'webp')
-  and not exists (
-    select 1
-    from public.sticker_catalog c
-    where c.storage_path = o.name
-  )
-on conflict (id) do nothing;

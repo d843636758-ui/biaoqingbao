@@ -970,6 +970,13 @@ function createServer(): McpServer {
         confidence: z.number().min(0).max(1).default(0.9),
         is_adult: z.boolean().default(false),
       },
+      outputSchema: {
+        saved: z.boolean(),
+        sticker_id: z.string(),
+        metadata_status: z.string(),
+        assistant_enabled: z.boolean(),
+        message: z.string(),
+      },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -979,23 +986,21 @@ function createServer(): McpServer {
     },
     async (metadata) => {
       const saved = await savePendingStickerMetadata(metadata);
+      const payload = {
+        saved: true,
+        sticker_id: saved.id,
+        metadata_status: String(saved.metadata_status ?? ""),
+        assistant_enabled: Boolean(saved.assistant_enabled),
+        message: saved.assistant_enabled
+          ? "中文语义已写回，图片现在可检索"
+          : "图片已识别，但因内容分级未启用",
+      };
       return {
+        structuredContent: payload,
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              {
-                saved: true,
-                sticker_id: saved.id,
-                metadata_status: saved.metadata_status,
-                assistant_enabled: saved.assistant_enabled,
-                message: saved.assistant_enabled
-                  ? "中文语义已写回，图片现在可检索"
-                  : "图片已识别，但因内容分级未启用",
-              },
-              null,
-              2,
-            ),
+            text: JSON.stringify(payload, null, 2),
           },
         ],
       };
