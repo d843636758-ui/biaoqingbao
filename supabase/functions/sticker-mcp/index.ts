@@ -35,8 +35,12 @@ const STICKER_ALT =
 // 一般不要动下面这些
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SERVER_VERSION = "1.1.0";
+const SERVER_VERSION = "1.2.0";
 const TEMPLATE_URI = "ui://sticker-mcp/sticker.html";
+// ChatGPT hosts MCP UI resources in this sandbox. Supabase is only the image
+// origin; using it as the widget origin makes iOS request an invalid Supabase
+// route such as /ui://sticker-mcp/sticker.html.
+const WIDGET_SANDBOX_ORIGIN = "https://web-sandbox.oaiusercontent.com";
 
 type StickerRow = {
   id: string;
@@ -388,6 +392,11 @@ const WIDGET_HTML = String.raw`<!doctype html>
       padding: 12px;
       font-size: 13px;
     }
+    .loading {
+      padding: 12px;
+      font-size: 13px;
+      opacity: .72;
+    }
   </style>
 </head>
 <body>
@@ -395,6 +404,7 @@ const WIDGET_HTML = String.raw`<!doctype html>
     <div class="card">
       <img id="sticker" alt="表情包" />
       <div id="caption" class="caption"></div>
+      <div id="loading" class="loading">正在加载表情包…</div>
       <div id="error" class="error">表情包加载失败</div>
     </div>
   </div>
@@ -403,17 +413,42 @@ const WIDGET_HTML = String.raw`<!doctype html>
     (() => {
       const img = document.getElementById("sticker");
       const caption = document.getElementById("caption");
+      const loading = document.getElementById("loading");
       const error = document.getElementById("error");
+      let rendered = false;
 
-      function render(data) {
-        if (!data || typeof data !== "object") return;
+      function extractPayload(value, depth) {
+        if (!value || typeof value !== "object" || depth > 5) return null;
+        if (typeof value.url === "string" && value.url) return value;
+
+        const candidates = [
+          value.structuredContent,
+          value.toolOutput,
+          value.result,
+          value.mcp_tool_result,
+          value.call_tool_result,
+          value.content
+        ];
+
+        for (const candidate of candidates) {
+          const payload = extractPayload(candidate, depth + 1);
+          if (payload) return payload;
+        }
+
+        return null;
+      }
+
+      function render(value) {
+        const data = extractPayload(value, 0);
+        if (!data) return false;
 
         const url = typeof data.url === "string" ? data.url : "";
         const alt = typeof data.alt === "string" ? data.alt : "表情包";
         const cap = typeof data.caption === "string" ? data.caption : "";
 
-        if (!url) return;
+        if (!url) return false;
 
+        rendered = true;
         img.alt = alt;
         img.src = url;
 
@@ -422,9 +457,18 @@ const WIDGET_HTML = String.raw`<!doctype html>
           // 默认不占空间；如果你以后想显示说明，把下一行改成 "block"。
           caption.style.display = "none";
         }
+
+        return true;
       }
 
+      img.addEventListener("load", () => {
+        loading.style.display = "none";
+        error.style.display = "none";
+        img.style.display = "block";
+      });
+
       img.addEventListener("error", () => {
+        loading.style.display = "none";
         img.style.display = "none";
         error.style.display = "block";
       });
@@ -440,10 +484,8 @@ const WIDGET_HTML = String.raw`<!doctype html>
         (event) => {
           try {
             const globals = event && event.detail && event.detail.globals;
-            render(
-              (globals && globals.toolOutput) ||
-              (window.openai && window.openai.toolOutput)
-            );
+            render(globals);
+            render(window.openai);
           } catch (_) {}
         },
         { passive: true }
@@ -458,12 +500,19 @@ const WIDGET_HTML = String.raw`<!doctype html>
           if (!message || message.jsonrpc !== "2.0") return;
           if (message.method !== "ui/notifications/tool-result") return;
 
-          try {
-            render(message.params && message.params.structuredContent);
-          } catch (_) {}
+          try { render(message.params); } catch (_) {}
         },
         { passive: true }
       );
+
+      // Some mobile clients attach the bridge after the document has loaded.
+      // Brief polling avoids a permanent blank card without making requests.
+      let attempts = 0;
+      const timer = window.setInterval(() => {
+        attempts += 1;
+        try { render(window.openai); } catch (_) {}
+        if (rendered || attempts >= 40) window.clearInterval(timer);
+      }, 100);
     })();
   </script>
 </body>
@@ -555,6 +604,8 @@ function createServer(): McpServer {
         ui: {
           resourceUri: TEMPLATE_URI,
         },
+        // Compatibility alias used by older ChatGPT mobile clients.
+        "openai/outputTemplate": TEMPLATE_URI,
       },
     },
     async ({ sticker_id }) => {
@@ -613,7 +664,7 @@ function createServer(): McpServer {
           _meta: {
             ui: {
               prefersBorder: false,
-              domain: normalizedOrigin(),
+              domain: WIDGET_SANDBOX_ORIGIN,
               csp: {
                 resourceDomains: [normalizedOrigin()],
                 connectDomains: [],
@@ -622,7 +673,8 @@ function createServer(): McpServer {
             // Keep the legacy aliases for ChatGPT clients that have not yet
             // migrated to the standard `_meta.ui` fields.
             "openai/widgetPrefersBorder": false,
-            "openai/widgetDomain": normalizedOrigin(),
+            "openai/widgetDescription": "显示 send_sticker 选中的真实表情包图片。",
+            "openai/widgetDomain": WIDGET_SANDBOX_ORIGIN,
             "openai/widgetCSP": {
               resource_domains: [normalizedOrigin()],
               connect_domains: [],

@@ -84,6 +84,12 @@ jobs:
             "https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/imports/dog26/st_dog26_012.png" \
             --output /tmp/imported-sticker.png
           test -s /tmp/imported-sticker.png
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --max-time 30 \
+            "https://${PROJECT_ID}.supabase.co/storage/v1/object/public/stickers/imports/whitecat/st_whitecat_001.gif" \
+            --output /tmp/whitecat.gif
+          test -s /tmp/whitecat.gif
+          test "$(head -c 3 /tmp/whitecat.gif)" = "GIF"
 
       - name: Verify Edge Function health endpoint
         if: steps.secrets.outputs.ready == 'true'
@@ -120,6 +126,20 @@ jobs:
             --output "$response_file"
           grep -q 'st_dog28_006' "$response_file"
 
+      - name: Verify white-cat search result
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          response_file="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --max-time 45 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json, text/event-stream" \
+            --data '{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"search_stickers","arguments":{"query":"疯狂摇头拒绝","emotion":"拒绝","tone":"搞怪","limit":5}}}' \
+            "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
+            --output "$response_file"
+          grep -q 'st_whitecat_001' "$response_file"
+
       - name: Verify send_sticker tool call
         if: steps.secrets.outputs.ready == 'true'
         run: |
@@ -129,10 +149,10 @@ jobs:
             --request POST \
             --header "Content-Type: application/json" \
             --header "Accept: application/json, text/event-stream" \
-            --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_sticker","arguments":{"sticker_id":"st_dog26_012"}}}' \
+            --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_sticker","arguments":{"sticker_id":"st_whitecat_001"}}}' \
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
             --output "$response_file"
-          grep -q 'st_dog26_012' "$response_file"
+          grep -q 'st_whitecat_001' "$response_file"
           grep -q 'structuredContent' "$response_file"
 
       - name: Verify widget resource metadata
@@ -147,5 +167,5 @@ jobs:
             --data '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"ui://sticker-mcp/sticker.html"}}' \
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
             --output "$response_file"
-          grep -q '"domain"' "$response_file"
+          grep -q 'https://web-sandbox.oaiusercontent.com' "$response_file"
           grep -q "https://${PROJECT_ID}.supabase.co" "$response_file"
