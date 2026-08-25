@@ -35,10 +35,16 @@ const STICKER_ALT =
 // 一般不要动下面这些
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SERVER_VERSION = "1.5.0";
-// UI resource URIs are cache keys. Increment this whenever the component
-// contract or embedded HTML changes so mobile clients cannot reuse stale UI.
+const SERVER_VERSION = "1.6.0";
+// Keep every previously advertised UI URI readable. ChatGPT can retain a tool
+// descriptor for an existing conversation, so removing an older URI makes the
+// host fail before the iframe is even created ("Failed to fetch template").
 const TEMPLATE_URI = "ui://sticker-mcp/sticker-v3.html";
+const TEMPLATE_URIS = [
+  TEMPLATE_URI,
+  "ui://sticker-mcp/sticker-v2.html",
+  "ui://sticker-mcp/sticker.html",
+] as const;
 // ChatGPT hosts MCP UI resources in this sandbox. Supabase is only the image
 // origin; using it as the widget origin makes iOS request an invalid Supabase
 // route such as /ui://sticker-mcp/sticker.html.
@@ -452,9 +458,7 @@ const WIDGET_HTML = String.raw`<!doctype html>
     </div>
   </div>
 
-  <script type="module">
-    import { App } from "https://esm.sh/@modelcontextprotocol/ext-apps@1.7.5/app-with-deps";
-
+  <script>
     (() => {
       const img = document.getElementById("sticker");
       const caption = document.getElementById("caption");
@@ -463,19 +467,45 @@ const WIDGET_HTML = String.raw`<!doctype html>
       let rendered = false;
       let fallbackStickerId = "";
 
-      // Standard MCP Apps bridge. Register one-shot handlers before connect()
-      // so mobile hosts cannot deliver the initial tool result too early.
-      const app = new App(
-        { name: "sticker-viewer", version: "1.5.0" },
-        {},
-        { autoResize: true }
-      );
-      app.ontoolresult = (result) => {
-        try { render(result); } catch (_) {}
-      };
-      app.ontoolinput = (input) => {
-        try { renderFromToolInput(input); } catch (_) {}
-      };
+      // MCP Apps bridge is kept inline so iOS never has to download a runtime
+      // module before it can receive the initial tool result. v1.5 used
+      // @modelcontextprotocol/ext-apps@1.7.5/app-with-deps + app.connect();
+      // this is the equivalent minimal ui/initialize handshake.
+      let bridgeRequestId = 1;
+      const pendingBridgeRequests = new Map();
+
+      function postBridge(message) {
+        window.parent.postMessage(message, "*");
+      }
+
+      function requestBridge(method, params) {
+        const id = bridgeRequestId++;
+        postBridge({ jsonrpc: "2.0", id, method, params });
+        return new Promise((resolve, reject) => {
+          const timeout = window.setTimeout(() => {
+            pendingBridgeRequests.delete(id);
+            reject(new Error("MCP Apps bridge timeout"));
+          }, 5000);
+          pendingBridgeRequests.set(id, { resolve, reject, timeout });
+        });
+      }
+
+      function notifyBridge(method, params) {
+        postBridge({ jsonrpc: "2.0", method, params });
+      }
+
+      async function connectBridge() {
+        try {
+          await requestBridge("ui/initialize", {
+            protocolVersion: "2026-01-26",
+            appCapabilities: {},
+            clientInfo: { name: "sticker-viewer", version: "1.6.0" }
+          });
+          notifyBridge("ui/notifications/initialized", {});
+        } catch (_) {
+          // Legacy window.openai and widget-data fallbacks remain active.
+        }
+      }
 
       function extractPayload(value, depth) {
         if (!value || typeof value !== "object" || depth > 5) return null;
@@ -581,10 +611,6 @@ const WIDGET_HTML = String.raw`<!doctype html>
         renderFromToolInput(window.openai);
       } catch (_) {}
 
-      app.connect().catch(() => {
-        // Legacy window.openai and widget-data fallbacks remain active below.
-      });
-
       // 当 ChatGPT 把 structuredContent 更新进 widget 时再渲染。
       window.addEventListener(
         "openai:set_globals",
@@ -609,6 +635,14 @@ const WIDGET_HTML = String.raw`<!doctype html>
           if (!message || message.jsonrpc !== "2.0") return;
 
           try {
+            if (message.id != null && pendingBridgeRequests.has(message.id)) {
+              const pending = pendingBridgeRequests.get(message.id);
+              pendingBridgeRequests.delete(message.id);
+              window.clearTimeout(pending.timeout);
+              if (message.error) pending.reject(message.error);
+              else pending.resolve(message.result);
+              return;
+            }
             if (message.method === "ui/notifications/tool-result") {
               render(message.params);
             }
@@ -619,6 +653,8 @@ const WIDGET_HTML = String.raw`<!doctype html>
         },
         { passive: true }
       );
+
+      connectBridge();
 
       // Some mobile clients attach the bridge after the document has loaded.
       // Brief polling avoids a permanent blank card without making requests.
@@ -746,42 +782,42 @@ function createServer(): McpServer {
     },
   );
 
-  registerAppResource(
-    server,
-    "表情包图片组件",
-    TEMPLATE_URI,
-    {
-      mimeType: RESOURCE_MIME_TYPE,
-    },
-    async () => ({
-      contents: [
-        {
-          uri: TEMPLATE_URI,
-          mimeType: RESOURCE_MIME_TYPE,
-          text: WIDGET_HTML,
-          _meta: {
-            ui: {
-              prefersBorder: false,
-              domain: WIDGET_SANDBOX_ORIGIN,
-              csp: {
-                resourceDomains: [normalizedOrigin(), "https://esm.sh"],
-                connectDomains: [normalizedOrigin()],
+  for (const [index, resourceUri] of TEMPLATE_URIS.entries()) {
+    registerAppResource(
+      server,
+      `表情包图片组件 ${index + 1}`,
+      resourceUri,
+      {},
+      async () => ({
+        contents: [
+          {
+            uri: resourceUri,
+            mimeType: RESOURCE_MIME_TYPE,
+            text: WIDGET_HTML,
+            _meta: {
+              ui: {
+                prefersBorder: false,
+                domain: WIDGET_SANDBOX_ORIGIN,
+                csp: {
+                  resourceDomains: [normalizedOrigin()],
+                  connectDomains: [normalizedOrigin()],
+                },
+              },
+              // Keep the legacy aliases for ChatGPT clients that have not yet
+              // migrated to the standard `_meta.ui` fields.
+              "openai/widgetPrefersBorder": false,
+              "openai/widgetDescription": "显示 send_sticker 选中的真实表情包图片。",
+              "openai/widgetDomain": WIDGET_SANDBOX_ORIGIN,
+              "openai/widgetCSP": {
+                resource_domains: [normalizedOrigin()],
+                connect_domains: [normalizedOrigin()],
               },
             },
-            // Keep the legacy aliases for ChatGPT clients that have not yet
-            // migrated to the standard `_meta.ui` fields.
-            "openai/widgetPrefersBorder": false,
-            "openai/widgetDescription": "显示 send_sticker 选中的真实表情包图片。",
-            "openai/widgetDomain": WIDGET_SANDBOX_ORIGIN,
-            "openai/widgetCSP": {
-              resource_domains: [normalizedOrigin(), "https://esm.sh"],
-              connect_domains: [normalizedOrigin()],
-            },
           },
-        },
-      ],
-    }),
-  );
+        ],
+      }),
+    );
+  }
 
   return server;
 }
