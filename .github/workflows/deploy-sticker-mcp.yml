@@ -106,7 +106,7 @@ jobs:
             --output "$response_file"
           grep -q 'send_sticker' "$response_file"
           grep -q 'outputSchema' "$response_file"
-          grep -q 'ui://sticker-mcp/sticker-v3.html' "$response_file"
+          grep -q 'ui://sticker-mcp/sticker-v4.html' "$response_file"
 
       - name: Verify search_stickers tool call
         if: steps.secrets.outputs.ready == 'true'
@@ -196,13 +196,18 @@ jobs:
             --request POST \
             --header "Content-Type: application/json" \
             --header "Accept: application/json, text/event-stream" \
-            --data '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"ui://sticker-mcp/sticker-v3.html"}}' \
+            --data '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"ui://sticker-mcp/sticker-v4.html"}}' \
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
             --output "$response_file"
           grep -q 'https://web-sandbox.oaiusercontent.com' "$response_file"
           grep -q "https://${PROJECT_ID}.supabase.co" "$response_file"
           grep -q 'ui/initialize' "$response_file"
           grep -q 'ui/notifications/initialized' "$response_file"
+          grep -q 'ui/notifications/size-changed' "$response_file"
+          grep -q 'notifyIntrinsicHeight' "$response_file"
+          grep -q 'setWidgetState' "$response_file"
+          grep -q 'widgetState' "$response_file"
+          grep -q 'ResizeObserver' "$response_file"
           grep -q 'widget-data?sticker_id=' "$response_file"
 
       - name: Verify cached widget URI compatibility
@@ -212,7 +217,8 @@ jobs:
           for resource_uri in \
             'ui://sticker-mcp/sticker.html' \
             'ui://sticker-mcp/sticker-v2.html' \
-            'ui://sticker-mcp/sticker-v3.html'; do
+            'ui://sticker-mcp/sticker-v3.html' \
+            'ui://sticker-mcp/sticker-v4.html'; do
             response_file="$(mktemp)"
             payload="$(jq -nc --arg uri "$resource_uri" \
               '{jsonrpc:"2.0",id:41,method:"resources/read",params:{uri:$uri}}')"
