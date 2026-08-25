@@ -91,6 +91,7 @@ jobs:
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
             --output "$response_file"
           grep -Eq '"protocolVersion"|"serverInfo"' "$response_file"
+          grep -q 'final_markdown' "$response_file"
 
       - name: Verify send_sticker descriptor contract
         if: steps.secrets.outputs.ready == 'true'
@@ -106,6 +107,7 @@ jobs:
             --output "$response_file"
           grep -q 'send_sticker' "$response_file"
           grep -q 'outputSchema' "$response_file"
+          grep -q 'final_markdown' "$response_file"
           grep -q 'ui://sticker-mcp/sticker-v4.html' "$response_file"
 
       - name: Verify search_stickers tool call
@@ -159,6 +161,7 @@ jobs:
             "https://${PROJECT_ID}.supabase.co/functions/v1/sticker-mcp/mcp" \
             --output "$send_response_file"
           grep -q 'st_feifeidu_001' "$send_response_file"
+          grep -Fq '![表情包](' "$send_response_file"
           grep -q '"mimeType":"image/jpeg"' "$send_response_file"
 
       - name: Verify send_sticker tool call
@@ -175,6 +178,7 @@ jobs:
             --output "$response_file"
           grep -q 'st_whitecat_001' "$response_file"
           grep -q 'structuredContent' "$response_file"
+          grep -Fq '![表情包](' "$response_file"
 
       - name: Verify mobile widget fallback endpoint
         if: steps.secrets.outputs.ready == 'true'
